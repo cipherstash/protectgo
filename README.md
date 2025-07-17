@@ -25,7 +25,7 @@
 
 <!-- start -->
 
-> [!IMPORTANT]  
+> [!WARNING]  
 > This is a work in progress.
 > The package is not yet available on pkg.go.dev.
 
