@@ -1,0 +1,41 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Generated C headers
+protect_ffi.h
+
+# Go build artifacts
+bin/
+*.test
+*.out
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# Coverage files
+coverage.txt
+coverage.html
+
+# Test databases
+*.db
+*.sqlite
+
+# Temporary files
+tmp/
+temp/ 
