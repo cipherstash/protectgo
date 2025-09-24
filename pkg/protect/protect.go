@@ -1,8 +1,9 @@
 package protect
 
 /*
-#cgo LDFLAGS: -L../../target/release -lprotect_ffi
-#include "../../protect_ffi.h"
+#cgo CFLAGS: -I${SRCDIR}/../../include
+#cgo LDFLAGS: -L${SRCDIR}/../../lib -lprotect_ffi
+#include "protect_ffi.h"
 #include <stdlib.h>
 */
 import "C"

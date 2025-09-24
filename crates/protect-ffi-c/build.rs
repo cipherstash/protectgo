@@ -5,6 +5,7 @@ fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let output_path = PathBuf::from(&crate_dir)
         .join("../../")
+        .join("include")
         .join("protect_ffi.h");
 
     cbindgen::generate(crate_dir)
