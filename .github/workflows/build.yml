@@ -1,0 +1,144 @@
+name: Build Libraries
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  # Detect what changed to optimize builds
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_rust_changed: ${{ steps.changes.outputs.rust }}
+      has_go_changed: ${{ steps.changes.outputs.go }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Detect file changes
+      id: changes
+      uses: dorny/paths-filter@v3
+      with:
+        filters: |
+          rust:
+            - '**/*.rs'
+            - 'Cargo.toml'
+            - 'Cargo.lock'
+            - 'crates/**'
+            - 'rust-toolchain.toml'
+          go:
+            - '**/*.go'
+            - 'go.mod'
+            - 'go.sum'
+            - 'pkg/**'
+
+  # Build native libraries on each platform
+  build-native-libraries:
+    name: Build Native Libraries
+    needs: [detect-changes]
+    if: |
+      always() &&
+      (needs.detect-changes.outputs.has_rust_changed == 'true' || 
+       (needs.detect-changes.outputs.has_go_changed == 'true'))
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (native build)
+          - platform: darwin-arm64
+            os: macos-14
+            rust_target: aarch64-apple-darwin
+
+          # macOS Intel (native build)
+          - platform: darwin-x64
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+
+          # Linux x64 (native build)
+          - platform: linux-x64-gnu
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-musl
+
+          # Linux ARM64
+          - platform: linux-arm64-gnu
+            os: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-musl
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup
+            target
+          key: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust_target }}-cargo
+            ${{ runner.os }}-cargo
+
+      # Linux build dependencies
+      - name: Install musl tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+
+    # Configure cargo linker for aarch64 Linux
+    - name: Configure cargo for aarch64 musl
+      if: matrix.rust_target == 'aarch64-unknown-linux-musl'
+      run: |
+        mkdir -p .cargo
+        echo '[target.aarch64-unknown-linux-musl]' >> .cargo/config.toml
+        echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Build library
+        run: |
+          cd crates/protect-ffi-c
+          cargo build --release 
+
+      - name: Copy library (Unix - native)
+        run: cp target/release/libprotect_ffi.a platforms/${{ matrix.platform }}/
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-${{ matrix.platform }}
+          path: platforms/${{ matrix.platform }}/libprotect_ffi.a
+          retention-days: 30
+
+    # Commit artifacts back to repo
+    - name: Commit and push artifacts
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add platforms
+        git commit -m "Update platforms for ${{ matrix.os }} ${{ matrix.arch }} [skip ci]" || echo "No changes to commit"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

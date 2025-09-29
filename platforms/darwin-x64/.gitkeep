@@ -1,0 +1,6 @@
+# This file keeps the directory in git until the library is built
+# To build the darwin-x64 library:
+# 1. Install rustup: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 2. Add target: rustup target add x86_64-apple-darwin
+# 3. Run: cargo build --release --target x86_64-apple-darwin
+# 4. Copy: cp target/x86_64-apple-darwin/release/libprotect_ffi.a platforms/darwin-x64/

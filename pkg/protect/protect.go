@@ -1,8 +1,16 @@
 package protect
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../include
-#cgo LDFLAGS: -L${SRCDIR}/../../lib -lprotect_ffi
+#cgo darwin,arm64 CFLAGS: -I${SRCDIR}/../../include
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../../platforms/darwin-arm64 -lprotect_ffi -framework CoreFoundation -framework Security
+#cgo darwin,amd64 CFLAGS: -I${SRCDIR}/../../include
+#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../platforms/darwin-x64 -lprotect_ffi -framework CoreFoundation -framework Security
+#cgo linux,arm64 CFLAGS: -I${SRCDIR}/../../include
+#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../platforms/linux-arm64-gnu -lprotect_ffi
+#cgo linux,amd64 CFLAGS: -I${SRCDIR}/../../include
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../platforms/linux-x64-gnu -lprotect_ffi
+#cgo windows,amd64 CFLAGS: -I${SRCDIR}/../../include
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../platforms/win32-x64-msvc -lprotect_ffi
 #include "protect_ffi.h"
 #include <stdlib.h>
 */

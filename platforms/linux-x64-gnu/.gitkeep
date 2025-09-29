@@ -1,0 +1,7 @@
+# This file keeps the directory in git until the library is built
+# To build the linux-x64-gnu library:
+# 1. Install rustup: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 2. Add target: rustup target add x86_64-unknown-linux-gnu
+# 3. Install cross-compilation toolchain (varies by host OS)
+# 4. Run: cargo build --release --target x86_64-unknown-linux-gnu
+# 5. Copy: cp target/x86_64-unknown-linux-gnu/release/libprotect_ffi.a platforms/linux-x64-gnu/

@@ -376,6 +376,64 @@ if err != nil {
 }
 ```
 
+## Building from source
+
+### Prerequisites
+
+- Go 1.21 or later
+- Rust toolchain (rustup recommended for cross-compilation)
+- C compiler (GCC or Clang)
+
+### Building
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/cipherstash/protectgo.git
+   cd protectgo
+   ```
+
+2. Build for current platform only:
+   ```bash
+   ./build.sh
+   ```
+
+3. Build for all supported platforms (requires rustup):
+   ```bash
+   ./build-cross.sh
+   ```
+
+4. Test the Go package:
+   ```bash
+   go test ./pkg/protect
+   ```
+
+### Cross-Platform Support
+
+This library supports Go modules on multiple platforms:
+- **darwin/arm64** (Apple Silicon Macs)
+- **darwin/amd64** (Intel Macs)
+- **linux/arm64** (ARM64 Linux)
+- **linux/amd64** (x86_64 Linux)
+- **windows/amd64** (Windows x64)
+
+Native libraries are automatically selected based on your build target using Go's build constraints. Platform-specific static libraries are stored in `platforms/` directories following the same layout as [protectphp-ffi](https://github.com/cipherstash/protectphp-ffi).
+
+To build all platform libraries, install [rustup](https://rustup.rs/) and run:
+```bash
+./build-cross.sh
+```
+
+### Automated Builds (GitHub Actions)
+
+This project uses GitHub Actions to automatically build libraries for all platforms using native runners. See [GITHUB_ACTIONS.md](./GITHUB_ACTIONS.md) for details.
+
+The CI system:
+- **Builds natively** on each platform (macOS, Linux, Windows)
+- **Detects changes** and only rebuilds when necessary  
+- **Tests Go integration** on multiple platforms
+- **Creates artifacts** with all platform libraries
+- **Generates build reports** showing platform status
+
 ### Didn't find what you wanted?
 
 [Click here to let us know what was missing from our docs.](https://github.com/cipherstash/protectgo/issues/new?template=docs-feedback.yml&title=[Docs:]%20Feedback%20on%20README.md) 

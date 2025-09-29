@@ -1,0 +1,7 @@
+# This file keeps the directory in git until the library is built
+# To build the win32-x64-msvc library:
+# 1. Install rustup: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 2. Add target: rustup target add x86_64-pc-windows-msvc
+# 3. Install MSVC toolchain or use Visual Studio Build Tools
+# 4. Run: cargo build --release --target x86_64-pc-windows-msvc
+# 5. Copy: cp target/x86_64-pc-windows-msvc/release/libprotect_ffi.a platforms/win32-x64-msvc/
