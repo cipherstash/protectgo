@@ -1,0 +1,229 @@
+name: Build Libraries
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  # Detect what changed to optimize builds
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_rust_changed: ${{ steps.changes.outputs.rust }}
+      has_go_changed: ${{ steps.changes.outputs.go }}
+      has_github_changed: ${{ steps.changes.outputs.github }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Detect file changes
+      id: changes
+      uses: dorny/paths-filter@v3
+      with:
+        filters: |
+          rust:
+            - '**/*.rs'
+            - 'Cargo.toml'
+            - 'Cargo.lock'
+            - 'crates/**'
+            - 'rust-toolchain.toml'
+          go:
+            - '**/*.go'
+            - 'go.mod'
+            - 'go.sum'
+            - 'pkg/**'
+          github:
+            - '.github/workflows/**'
+
+  # Build native libraries on each platform
+  build-native-libraries:
+    name: Build Native Libraries
+    needs: [detect-changes]
+    if: |
+      always() &&
+      (needs.detect-changes.outputs.has_rust_changed == 'true' || 
+      (needs.detect-changes.outputs.has_go_changed == 'true') || 
+       (needs.detect-changes.outputs.has_github_changed == 'true'))
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (native build)
+          - platform: darwin-arm64
+            os: macos-14
+            rust_target: aarch64-apple-darwin
+
+          # macOS Intel (native build)
+          - platform: darwin-x64
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+
+          # Linux x64 musl (for Alpine and static linking)
+          - platform: linux-x64-musl
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-musl
+            libc: musl
+
+          # Linux x64 glibc (for Debian/Ubuntu/CentOS)
+          - platform: linux-x64-gnu
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            libc: glibc
+
+          # Linux arm64 musl (for Alpine and static linking)
+          - platform: linux-arm64-musl
+            os: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            libc: musl
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup
+            target
+          key: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust_target }}-cargo
+            ${{ runner.os }}-cargo
+
+      # Linux build dependencies
+      - name: Install musl tools
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev
+
+      # Configure musl linking for static builds
+      - name: Configure musl linking
+        if: contains(matrix.rust_target, 'musl') && startsWith(matrix.os, 'ubuntu')
+        run: |
+          mkdir -p .cargo
+          echo '[target.x86_64-unknown-linux-musl]' >> .cargo/config.toml
+          echo 'rustflags = ["-C", "target-feature=+crt-static"]' >> .cargo/config.toml
+
+      - name: Build library
+        run: |
+          cd crates/protect-ffi-c
+          cargo build --release --target ${{ matrix.rust_target }}
+
+      - name: Copy library
+        run: |
+          # Create platform-specific filename for direct CGO usage
+          case "${{ matrix.platform }}" in
+            darwin-arm64)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_darwin_arm64.a
+              ;;
+            darwin-x64)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_darwin_x64.a
+              ;;
+            linux-arm64-musl)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_arm64_musl.a
+              ;;
+            linux-x64-musl)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_x64_musl.a
+              ;;
+            linux-arm64-gnu)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_arm64.a
+              ;;
+            linux-x64-gnu)
+              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_x64.a
+              ;;
+          esac
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-${{ matrix.platform }}
+          path: pkg/protect/libprotect_ffi_*.a
+          retention-days: 30
+
+  # Commit all generated libraries at once
+  commit-artifacts:
+    name: Commit All Generated Libraries
+    needs: [build-native-libraries]
+    if: always() && needs.build-native-libraries.result == 'success'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: library-*
+          path: temp-artifacts
+          merge-multiple: false
+
+      - name: Copy artifacts to package directory
+        run: |
+          for artifact_dir in temp-artifacts/library-*; do
+            platform=$(basename "$artifact_dir" | sed 's/library-//')
+            echo "Copying library for platform: $platform"
+            
+            # Copy platform-specific files to package directory
+            if [ -f "$artifact_dir/libprotect_ffi_darwin_arm64.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_darwin_arm64.a" "pkg/protect/"
+            fi
+            if [ -f "$artifact_dir/libprotect_ffi_darwin_x64.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_darwin_x64.a" "pkg/protect/"
+            fi
+            if [ -f "$artifact_dir/libprotect_ffi_linux_arm64.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_linux_arm64.a" "pkg/protect/"
+            fi
+            if [ -f "$artifact_dir/libprotect_ffi_linux_x64.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_linux_x64.a" "pkg/protect/"
+            fi
+            if [ -f "$artifact_dir/libprotect_ffi_linux_arm64_musl.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_linux_arm64_musl.a" "pkg/protect/"
+            fi
+            if [ -f "$artifact_dir/libprotect_ffi_linux_x64_musl.a" ]; then
+              cp "$artifact_dir/libprotect_ffi_linux_x64_musl.a" "pkg/protect/"
+            fi
+          done
+
+      - name: Commit and push all artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pkg/protect/*.a
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update all platform libraries [skip ci]"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

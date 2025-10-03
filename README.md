@@ -37,6 +37,7 @@ Protect.go is a Go module for encrypting and decrypting data. Encryption operati
 ## Table of contents
 
 - [Features](#features)
+- [Prebuilt Libraries](#prebuilt-libraries)
 - [Installing Protect.go](#installing-protectgo)
 - [Getting started](#getting-started)
 - [Basic usage](#basic-usage)
@@ -71,6 +72,33 @@ Protect.go protects data using industry-standard AES encryption. Protect.go uses
 - **Trusted data access**: make sure only your end-users can access their sensitive data stored in your product.
 - **Meet compliance requirements faster**: meet and exceed the data encryption requirements of SOC2 and ISO27001.
 - **Reduce the blast radius of data breaches**: limit the impact of exploited vulnerabilities to only the data your end-users can decrypt.
+
+## Prebuilt Libraries
+
+Protect.go uses prebuilt static libraries to provide native cryptographic functionality across different platforms. The core encryption and decryption operations are implemented in Rust and compiled into platform-specific static libraries that are embedded directly into the Go package.
+
+### What libraries are prebuilt
+
+The following static libraries are prebuilt and included in the Go package:
+
+- **macOS ARM64**: `libprotect_ffi_darwin_arm64.a`
+- **macOS Intel**: `libprotect_ffi_darwin_x64.a`  
+- **Linux ARM64**: `libprotect_ffi_linux_arm64.a`
+- **Linux x64**: `libprotect_ffi_linux_x64.a`
+- **Linux ARM64 (musl)**: `libprotect_ffi_linux_arm64_musl.a`
+- **Linux x64 (musl)**: `libprotect_ffi_linux_x64_musl.a`
+
+These libraries contain the compiled Rust code from the `protect-ffi-c` crate, which provides C-compatible FFI bindings for the CipherStash client functionality.
+
+### How the libraries work
+
+1. **Rust Implementation**: Core encryption logic is implemented in Rust in the `crates/protect-ffi-c` directory
+2. **C FFI Layer**: The Rust code exports C-compatible functions using FFI (Foreign Function Interface)
+3. **Header Generation**: C headers are automatically generated using `cbindgen` during the build process
+4. **Static Linking**: The Go package uses CGO to statically link against the appropriate prebuilt library for your platform
+5. **Platform Selection**: The correct library is automatically selected at build time based on your OS and architecture
+
+This approach ensures that Protect.go can leverage high-performance Rust cryptographic implementations while providing a native Go API, without requiring users to install Rust or compile anything themselves.
 
 ## Installing Protect.go
 
@@ -374,6 +402,36 @@ if err != nil {
     log.Printf("Encryption failed: %v", err)
     return err
 }
+```
+
+## Running the basic usage example
+
+### Running with glibc (default)
+
+For most Linux distributions that use glibc:
+
+```bash
+go run examples/basic_usage.go
+```
+
+### Running with musl (Alpine Linux)
+
+For Alpine Linux or musl-based systems:
+
+```bash
+go run -tags=musl examples/basic_usage.go
+```
+
+### Building a static binary with musl
+
+To create a completely static binary of the example:
+
+```bash
+# Build static Go binary
+CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -tags=musl examples/basic_usage.go
+
+# Run the static binary
+./basic_usage_static
 ```
 
 ### Didn't find what you wanted?

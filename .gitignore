@@ -3,9 +3,6 @@
 **/*.rs.bk
 Cargo.lock
 
-# Generated C headers
-protect_ffi.h
-
 # Go build artifacts
 bin/
 *.test

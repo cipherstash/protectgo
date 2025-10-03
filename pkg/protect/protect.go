@@ -1,8 +1,15 @@
 package protect
 
 /*
-#cgo LDFLAGS: -L../../target/release -lprotect_ffi
-#include "../../protect_ffi.h"
+#cgo LDFLAGS: -L${SRCDIR}
+#cgo darwin LDFLAGS: -framework CoreFoundation -framework Security
+#cgo darwin,arm64 LDFLAGS: -lprotect_ffi_darwin_arm64
+#cgo darwin,amd64 LDFLAGS: -lprotect_ffi_darwin_x64
+#cgo linux,arm64,!musl LDFLAGS: -lprotect_ffi_linux_arm64 -lm -ldl -lpthread
+#cgo linux,amd64,!musl LDFLAGS: -lprotect_ffi_linux_x64 -lm -ldl -lpthread
+#cgo linux,arm64,musl LDFLAGS: -lprotect_ffi_linux_arm64_musl
+#cgo linux,amd64,musl LDFLAGS: -lprotect_ffi_linux_x64_musl
+#include "protect_ffi.h"
 #include <stdlib.h>
 */
 import "C"
@@ -12,7 +19,7 @@ import (
 	"unsafe"
 )
 
-// Client represents a protect FFI client
+// Client represents a protect FFI client.
 type Client struct {
 	ptr unsafe.Pointer
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/cipherstash/protectgo/pkg/protect"
 )
@@ -14,7 +15,7 @@ func main() {
 		Tables: protect.Tables{
 			"users": protect.Table{
 				"email": protect.Column{
-					CastAs: stringPtr(protect.CastAsText),
+					CastAs: ptr(protect.CastAsText),
 					Indexes: &protect.Indexes{
 						OreIndex: &protect.OreIndexOpts{},
 						UniqueIndex: &protect.UniqueIndexOpts{
@@ -25,12 +26,12 @@ func main() {
 					},
 				},
 				"name": protect.Column{
-					CastAs: stringPtr(protect.CastAsText),
+					CastAs: ptr(protect.CastAsText),
 					Indexes: &protect.Indexes{
 						MatchIndex: &protect.MatchIndexOpts{
-							K:               intPtr(6),
-							M:               intPtr(2048),
-							IncludeOriginal: boolPtr(false),
+							K:               ptr(6),
+							M:               ptr(2048),
+							IncludeOriginal: ptr(false),
 						},
 					},
 				},
@@ -41,12 +42,11 @@ func main() {
 	// Create client options
 	clientOpts := protect.NewClientOptions{
 		EncryptConfig: config,
-		ClientOpts:    &protect.ClientOpts{
-			// These would typically come from environment variables
-			// WorkspaceCrn: stringPtr("crn:cipherstash:workspace::..."),
-			// AccessKey:    stringPtr("your-access-key"),
-			// ClientID:     stringPtr("your-client-id"),
-			// ClientKey:    stringPtr("your-client-key"),
+		ClientOpts: &protect.ClientOpts{
+			WorkspaceCrn: ptr(os.Getenv("CIPHERSTASH_WORKSPACE_CRN")),
+			AccessKey:    ptr(os.Getenv("CIPHERSTASH_ACCESS_KEY")),
+			ClientID:     ptr(os.Getenv("CIPHERSTASH_CLIENT_ID")),
+			ClientKey:    ptr(os.Getenv("CIPHERSTASH_CLIENT_KEY")),
 		},
 	}
 
@@ -146,15 +146,6 @@ func main() {
 	}
 }
 
-// Helper functions for creating pointers
-func stringPtr(s protect.CastAs) *protect.CastAs {
-	return &s
-}
-
-func intPtr(i int) *int {
-	return &i
-}
-
-func boolPtr(b bool) *bool {
-	return &b
+func ptr[T any](v T) *T {
+	return &v
 }
