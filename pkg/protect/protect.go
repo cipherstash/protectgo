@@ -14,8 +14,11 @@ package protect
 */
 import "C"
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -189,6 +192,61 @@ type Encrypted struct {
 	Version     uint16     `json:"v"`
 	// For SteVec type
 	SteVecIndex interface{} `json:"sv,omitempty"`
+}
+
+// Value implements driver.Valuer for Encrypted.
+// It formats the encrypted data for PostgreSQL eql_v2_encrypted composite type.
+func (e *Encrypted) Value() (driver.Value, error) {
+	if e == nil {
+		return nil, nil
+	}
+
+	m := map[string]Encrypted{
+		"data": *e,
+	}
+
+	jsonBytes, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal encrypted value: %w", err)
+	}
+
+	return string(jsonBytes), nil
+}
+
+// Scan implements sql.Scanner for Encrypted.
+// It deserializes JSON data from PostgreSQL eql_v2_encrypted columns.
+func (e *Encrypted) Scan(value interface{}) error {
+	var jsonStr string
+	switch v := value.(type) {
+	case string:
+		jsonStr = v
+	case []byte:
+		jsonStr = string(v)
+	default:
+		return fmt.Errorf("cannot scan %T into Encrypted", value)
+	}
+
+	if jsonStr == "" {
+		return nil
+	}
+
+	if jsonStr[0] == '(' {
+		jsonStr = strings.Replace(jsonStr[2:len(jsonStr)-2], "\"\"", "\"", -1)
+	}
+
+	m := map[string]Encrypted{}
+
+	err := json.Unmarshal([]byte(jsonStr), &m)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal encrypted value: %w", err)
+	}
+
+	data, ok := m["data"]
+	if ok {
+		e = &data
+	}
+
+	return nil
 }
 
 // DecryptResult represents the result of a fallible decryption operation
