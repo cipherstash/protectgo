@@ -255,11 +255,27 @@ func main() {
 	// 11. Error handling with errors.Is
 	// ---------------------------------------------------------------
 
-	_, err = client.Encrypt(ctx, users.Column("email"), "test")
+	// Use ColumnOK for safe column lookup without panics.
+	if col, ok := users.ColumnOK("nonexistent_column"); ok {
+		_, err = client.Encrypt(ctx, col, "test")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
+	} else {
+		fmt.Println("Column not found in schema (caught safely with ColumnOK)")
+	}
+
+	// Programmatic error handling with sentinel errors.
+	_, err = client.EncryptQuery(ctx, users.Column("email"), protect.OrderAndRange, "test")
 	if err != nil {
-		if errors.Is(err, protect.ErrUnknownColumn) {
+		switch {
+		case errors.Is(err, protect.ErrMissingIndex):
+			fmt.Println("Index not configured for this query type (expected)")
+		case errors.Is(err, protect.ErrUnknownColumn):
 			fmt.Println("Column not found in schema")
-		} else {
+		case errors.Is(err, protect.ErrClientClosed):
+			fmt.Println("Client was already closed")
+		default:
 			fmt.Printf("Error: %v\n", err)
 		}
 	}

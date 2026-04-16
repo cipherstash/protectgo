@@ -20,14 +20,26 @@ func (td *TableDef) Name() string {
 	return td.name
 }
 
-// Column returns a ColumnRef for the named column in this table.
+// Column returns a [ColumnRef] for the named column in this table.
 // It panics if the column name is not defined in the schema, since
 // this indicates a programming error that should be caught at init time.
+//
+// For a non-panicking alternative, use [TableDef.ColumnOK].
 func (td *TableDef) Column(name string) ColumnRef {
 	if _, ok := td.columns[name]; !ok {
 		panic(fmt.Sprintf("protect: column %q not found in table %q", name, td.name))
 	}
 	return ColumnRef{table: td.name, column: name}
+}
+
+// ColumnOK returns a [ColumnRef] for the named column and a boolean indicating
+// whether the column exists in the schema. Unlike [TableDef.Column], it does
+// not panic on unknown columns.
+func (td *TableDef) ColumnOK(name string) (ColumnRef, bool) {
+	if _, ok := td.columns[name]; !ok {
+		return ColumnRef{}, false
+	}
+	return ColumnRef{table: td.name, column: name}, true
 }
 
 // TableSchema creates a table schema definition by parsing `cs` struct tags
@@ -171,7 +183,7 @@ func (cb *ColumnBuilder) OrderAndRange() *ColumnBuilder {
 
 // SearchableJSON adds an ste_vec index and sets the cast type to JSON.
 func (cb *ColumnBuilder) SearchableJSON(prefix string) *ColumnBuilder {
-	cb.castAs = CastAsJson
+	cb.castAs = CastAsJSON
 	cb.indexes.SteVecIndex = &SteVecIndexOpts{Prefix: prefix}
 	return cb
 }
@@ -285,7 +297,7 @@ func parseColumn(directives []string, fieldType reflect.Type) Column {
 	// Determine cast type.
 	if castAs == nil {
 		if autoJson {
-			ca := CastAsJson
+			ca := CastAsJSON
 			castAs = &ca
 		} else {
 			ca := inferCastAs(fieldType)
@@ -417,7 +429,7 @@ func inferCastAs(fieldType reflect.Type) CastAs {
 		return CastAsBoolean
 	default:
 		// Maps, structs, interfaces, slices, arrays, etc.
-		return CastAsJson
+		return CastAsJSON
 	}
 }
 

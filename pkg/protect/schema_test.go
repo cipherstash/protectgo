@@ -251,8 +251,8 @@ func TestParseColumnSteVec(t *testing.T) {
 	if col.Indexes.SteVecIndex.Prefix != "users/profile" {
 		t.Errorf("prefix: got %q, want %q", col.Indexes.SteVecIndex.Prefix, "users/profile")
 	}
-	if col.CastAs == nil || *col.CastAs != CastAsJson {
-		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsJson)
+	if col.CastAs == nil || *col.CastAs != CastAsJSON {
+		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsJSON)
 	}
 }
 
@@ -298,9 +298,9 @@ func TestInferCastAs(t *testing.T) {
 		{"float32", reflect.TypeOf(float32(0)), CastAsNumber},
 		{"float64", reflect.TypeOf(float64(0)), CastAsNumber},
 		{"bool", reflect.TypeOf(false), CastAsBoolean},
-		{"map", reflect.TypeOf(map[string]any{}), CastAsJson},
-		{"slice", reflect.TypeOf([]string{}), CastAsJson},
-		{"interface", reflect.TypeOf((*any)(nil)).Elem(), CastAsJson},
+		{"map", reflect.TypeOf(map[string]any{}), CastAsJSON},
+		{"slice", reflect.TypeOf([]string{}), CastAsJSON},
+		{"interface", reflect.TypeOf((*any)(nil)).Elem(), CastAsJSON},
 		{"*string", reflect.TypeOf((*string)(nil)), CastAsString},
 		{"*int", reflect.TypeOf((*int)(nil)), CastAsNumber},
 		{"*bool", reflect.TypeOf((*bool)(nil)), CastAsBoolean},
@@ -392,8 +392,8 @@ func TestTableSchemaFullStruct(t *testing.T) {
 	if !ok {
 		t.Fatal("missing profile column")
 	}
-	if *profile.CastAs != CastAsJson {
-		t.Errorf("profile cast_as: got %q, want %q", *profile.CastAs, CastAsJson)
+	if *profile.CastAs != CastAsJSON {
+		t.Errorf("profile cast_as: got %q, want %q", *profile.CastAs, CastAsJSON)
 	}
 	if profile.Indexes == nil || profile.Indexes.SteVecIndex == nil {
 		t.Fatal("profile: expected ste_vec index")
@@ -475,6 +475,28 @@ func TestTableDefColumn(t *testing.T) {
 	}
 	if col.column != "email" {
 		t.Errorf("column: got %q, want %q", col.column, "email")
+	}
+}
+
+func TestTableDefColumnOK(t *testing.T) {
+	t.Parallel()
+
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+
+	col, ok := td.ColumnOK("email")
+	if !ok {
+		t.Fatal("expected email column to exist")
+	}
+	if col.table != "users" || col.column != "email" {
+		t.Errorf("ColumnOK: got table=%q column=%q", col.table, col.column)
+	}
+
+	_, ok = td.ColumnOK("nonexistent")
+	if ok {
+		t.Fatal("expected nonexistent column to not exist")
 	}
 }
 
@@ -873,8 +895,8 @@ func TestSchemaBuilderSearchableJSON(t *testing.T) {
 		Build()
 
 	meta := td.columns["metadata"]
-	if *meta.CastAs != CastAsJson {
-		t.Errorf("cast_as: got %q, want %q", *meta.CastAs, CastAsJson)
+	if *meta.CastAs != CastAsJSON {
+		t.Errorf("cast_as: got %q, want %q", *meta.CastAs, CastAsJSON)
 	}
 	if meta.Indexes == nil || meta.Indexes.SteVecIndex == nil {
 		t.Fatal("expected ste_vec index")

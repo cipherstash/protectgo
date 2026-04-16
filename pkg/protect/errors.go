@@ -31,6 +31,11 @@ var (
 
 	// ErrSteVecRequiresJSON indicates an ste_vec index requires a JSON cast type.
 	ErrSteVecRequiresJSON = errors.New("protect: ste_vec requires json cast type")
+
+	// ErrFFI indicates an unclassified error from the FFI layer.
+	// Use errors.Is(err, ErrFFI) to check if an error originated from the
+	// underlying encryption engine when no more specific sentinel applies.
+	ErrFFI = errors.New("protect: FFI error")
 )
 
 // Error is a structured error from the encryption SDK.
@@ -79,6 +84,6 @@ func inferSentinel(msg string) error {
 	case strings.Contains(msg, "ste_vec index requires cast_as"):
 		return ErrSteVecRequiresJSON
 	default:
-		return nil
+		return ErrFFI
 	}
 }

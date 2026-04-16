@@ -1,4 +1,5 @@
-// Package protect provides field-level encryption with searchable encryption support.
+// Package protect provides field-level encryption with searchable encryption support,
+// powered by CipherStash ZeroKMS.
 //
 // Define your schema using struct tags or the programmatic builder, then use
 // the Client to encrypt, decrypt, and query encrypted data.
@@ -8,6 +9,18 @@
 //	defer client.Close()
 //
 //	encrypted, err := client.Encrypt(ctx, users.Column("email"), "john@example.com")
+//
+// # Concurrency
+//
+// A Client is safe for concurrent use by multiple goroutines. All exported
+// methods synchronize access to the underlying FFI handle.
+//
+// # Credentials
+//
+// If no explicit credentials are provided via [WithCredentials], the client
+// reads configuration from environment variables (CS_WORKSPACE_CRN,
+// CS_CLIENT_ACCESS_KEY, CS_CLIENT_ID, CS_CLIENT_KEY) or from
+// cipherstash.toml / cipherstash.secret.toml in the working directory.
 package protect
 
 /*
@@ -26,28 +39,50 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"sync"
 	"unsafe"
 )
+
+// Compile-time interface assertions.
+var _ io.Closer = (*Client)(nil)
 
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
 
 // Client is the main entry point for encryption and decryption operations.
-// Create one with NewClient and release resources with Close.
+// Create one with [NewClient] and release resources with [Client.Close].
+//
+// A Client is safe for concurrent use by multiple goroutines.
 type Client struct {
+	mu  sync.RWMutex
 	ptr unsafe.Pointer
 }
 
-// Close releases resources held by the client. Implements io.Closer.
-// It is safe to call Close multiple times.
+// Close releases resources held by the client. Implements [io.Closer].
+// It is safe to call Close multiple times; subsequent calls are no-ops.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.ptr == nil {
 		return nil
 	}
 	C.protect_free_client((*C.struct_Client)(c.ptr))
 	c.ptr = nil
 	return nil
+}
+
+// acquirePtr returns the FFI pointer under a read lock, or an error if the
+// client is closed. The caller must call the returned unlock function when done.
+func (c *Client) acquirePtr(op string) (unsafe.Pointer, func(), error) {
+	c.mu.RLock()
+	if c.ptr == nil {
+		c.mu.RUnlock()
+		return nil, nil, &Error{Op: op, Err: ErrClientClosed, Message: "protect: client is closed"}
+	}
+	return c.ptr, c.mu.RUnlock, nil
 }
 
 // ColumnRef is a reference to an encrypted column within a table schema.
@@ -92,7 +127,12 @@ const (
 	CastAsNumber  CastAs = "number"
 	CastAsString  CastAs = "string"
 	CastAsText    CastAs = "text"
-	CastAsJson    CastAs = "json"
+	CastAsJSON    CastAs = "json"
+
+	// CastAsJson is a deprecated alias for [CastAsJSON].
+	//
+	// Deprecated: Use CastAsJSON instead.
+	CastAsJson = CastAsJSON
 )
 
 // Identifier represents a table and column identifier in the EQL wire format.
@@ -179,26 +219,36 @@ type Encrypted struct {
 	SteVecIndex any        `json:"sv,omitempty"`
 }
 
-// PlaintextItem is a single value for bulk encryption.
+// PlaintextItem is a single value for bulk encryption via [Client.EncryptBulk].
 type PlaintextItem struct {
-	Column      ColumnRef
-	Plaintext   any
-	LockContext *LockContext // optional per-item override
+	// Column identifies the table and column for encryption.
+	Column ColumnRef
+	// Plaintext is the value to encrypt. Must be JSON-serializable.
+	Plaintext any
+	// LockContext optionally overrides the call-level lock context for this item.
+	LockContext *LockContext
 }
 
-// QueryItem is a single query for bulk query encryption.
+// QueryItem is a single query for bulk query encryption via [Client.EncryptQueryBulk].
 type QueryItem struct {
-	Column      ColumnRef
-	QueryType   QueryType
-	Plaintext   any
-	LockContext *LockContext // optional per-item override
+	// Column identifies the table and column to query.
+	Column ColumnRef
+	// QueryType selects the index type for the search.
+	QueryType QueryType
+	// Plaintext is the search term. Must be JSON-serializable.
+	Plaintext any
+	// LockContext optionally overrides the call-level lock context for this item.
+	LockContext *LockContext
 }
 
 // DecryptResult represents the result of a single item in a fallible bulk
-// decryption. Exactly one of Data or Err is populated.
+// decryption via [Client.DecryptBulkFallible]. Exactly one of Data or Err
+// is populated.
 type DecryptResult struct {
+	// Data holds the decrypted plaintext as a JSON-deserialized Go value.
 	Data any
-	Err  error
+	// Err holds the decryption error for this item, if any.
+	Err error
 }
 
 // ---------------------------------------------------------------------------
@@ -349,12 +399,12 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: NewClient: %w", err)
 	}
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: NewClient: marshaling options: %w", err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -390,12 +440,20 @@ func buildEncryptConfigFromSchemas(schemas []*TableDef) EncryptConfig {
 // ---------------------------------------------------------------------------
 
 // Encrypt encrypts a single plaintext value for the given column.
+//
+// The plaintext can be any JSON-serializable value. The returned [Encrypted]
+// payload contains the ciphertext and any configured search indexes.
 func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts ...Option) (*Encrypted, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "Encrypt", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "Encrypt"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -420,17 +478,17 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_encrypt((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_encrypt((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("Encrypt", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -438,7 +496,7 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 
 	var encrypted Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return &encrypted, nil
@@ -449,12 +507,20 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 // ---------------------------------------------------------------------------
 
 // Decrypt decrypts a single encrypted value and returns the plaintext.
+//
+// The returned value is a JSON-deserialized Go value: string, float64, bool,
+// nil, map[string]any, or []any, depending on what was originally encrypted.
 func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Option) (any, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "Decrypt", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "Decrypt"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -475,17 +541,17 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_decrypt((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_decrypt((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("Decrypt", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	plaintextJSON := C.GoString(result.data)
@@ -493,7 +559,7 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 
 	var plaintext any
 	if err := json.Unmarshal([]byte(plaintextJSON), &plaintext); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return plaintext, nil
@@ -504,12 +570,19 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 // ---------------------------------------------------------------------------
 
 // EncryptBulk encrypts multiple plaintext values in a single operation.
+// This is significantly more efficient than calling [Client.Encrypt] in a loop
+// because it uses a single KMS call for all items.
 func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ...Option) ([]Encrypted, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "EncryptBulk", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "EncryptBulk"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -548,17 +621,17 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_encrypt_bulk((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_encrypt_bulk((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("EncryptBulk", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -566,7 +639,7 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 
 	var encrypted []Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return encrypted, nil
@@ -577,13 +650,18 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 // ---------------------------------------------------------------------------
 
 // DecryptBulk decrypts multiple encrypted values in a single operation.
-// Use WithLockContext to apply a shared lock context to all items.
+// Use [WithLockContext] to apply a shared lock context to all items.
 func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Option) ([]any, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "DecryptBulk", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "DecryptBulk"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -614,17 +692,17 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_decrypt_bulk((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_decrypt_bulk((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("DecryptBulk", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	plaintextJSON := C.GoString(result.data)
@@ -632,7 +710,7 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 	var plaintexts []any
 	if err := json.Unmarshal([]byte(plaintextJSON), &plaintexts); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return plaintexts, nil
@@ -644,12 +722,20 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 // DecryptBulkFallible decrypts multiple encrypted values, returning per-item
 // results where each item independently succeeds or fails.
+//
+// Unlike [Client.DecryptBulk], a single item's failure does not cause the
+// entire operation to fail. Check each [DecryptResult.Err] individually.
 func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, opts ...Option) ([]DecryptResult, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "DecryptBulkFallible", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "DecryptBulkFallible"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -680,17 +766,17 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_decrypt_bulk_fallible((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_decrypt_bulk_fallible((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("DecryptBulkFallible", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	resultsJSON := C.GoString(result.data)
@@ -703,13 +789,13 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 
 	var ffiResults []ffiDecryptResult
 	if err := json.Unmarshal([]byte(resultsJSON), &ffiResults); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	results := make([]DecryptResult, len(ffiResults))
 	for i, r := range ffiResults {
 		if r.Error != nil {
-			results[i] = DecryptResult{Err: newError("DecryptBulkFallible", *r.Error)}
+			results[i] = DecryptResult{Err: newError(op, *r.Error)}
 		} else {
 			results[i] = DecryptResult{Data: r.Data}
 		}
@@ -723,12 +809,22 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 // ---------------------------------------------------------------------------
 
 // EncryptQuery encrypts a value for searching against an encrypted column.
+//
+// The queryType determines which index is used for the search. For example,
+// [Equality] produces an HMAC for exact-match, [FreeTextSearch] produces a
+// bloom filter for full-text search, and [OrderAndRange] produces an ORE
+// ciphertext for range comparisons.
 func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType QueryType, plaintext any, opts ...Option) (*Encrypted, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "EncryptQuery", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "EncryptQuery"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -759,17 +855,17 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_encrypt_query((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_encrypt_query((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("EncryptQuery", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -777,7 +873,7 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 
 	var encrypted Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return &encrypted, nil
@@ -789,11 +885,16 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 
 // EncryptQueryBulk encrypts multiple query values in a single operation.
 func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts ...Option) ([]Encrypted, error) {
-	if c.ptr == nil {
-		return nil, &Error{Op: "EncryptQueryBulk", Err: ErrClientClosed, Message: "protect: client is closed"}
-	}
-	if err := ctx.Err(); err != nil {
+	const op = "EncryptQueryBulk"
+
+	ptr, unlock, err := c.acquirePtr(op)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -837,17 +938,17 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_encrypt_query_bulk((*C.struct_Client)(c.ptr), cOptionsJSON)
+	result := C.protect_encrypt_query_bulk((*C.struct_Client)(ptr), cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("EncryptQueryBulk", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -855,7 +956,7 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 
 	var encrypted []Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
 	return encrypted, nil
@@ -866,7 +967,9 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 // ---------------------------------------------------------------------------
 
 // IsEncrypted checks whether a value is a valid EQL encrypted payload.
-// This is a standalone function that does not require a Client.
+// This is a standalone function that does not require a [Client].
+//
+// Note: this function makes a CGO call to validate the payload structure.
 func IsEncrypted(value any) bool {
 	valueJSON, err := json.Marshal(value)
 	if err != nil {

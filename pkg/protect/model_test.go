@@ -2,6 +2,7 @@ package protect
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -518,156 +519,71 @@ func TestToEncrypted(t *testing.T) {
 	})
 }
 
-// --- Input validation tests for EncryptModel ---
+// --- Client closed tests for model methods ---
 
-func TestEncryptModelValidation(t *testing.T) {
+func TestEncryptModelClientClosed(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	c := &Client{}
+	c := &Client{} // ptr is nil — simulates a closed client
 	schema := &TableDef{name: "users", columns: map[string]Column{}}
 
-	t.Run("nil model", func(t *testing.T) {
-		t.Parallel()
-		_, err := c.EncryptModel(ctx, schema, nil)
-		if err == nil {
-			t.Fatal("expected error for nil model")
-		}
-	})
-
-	t.Run("non-struct model", func(t *testing.T) {
-		t.Parallel()
-		_, err := c.EncryptModel(ctx, schema, "not a struct")
-		if err == nil {
-			t.Fatal("expected error for string model")
-		}
-	})
-
-	t.Run("slice model", func(t *testing.T) {
-		t.Parallel()
-		_, err := c.EncryptModel(ctx, schema, []string{"a"})
-		if err == nil {
-			t.Fatal("expected error for slice model")
-		}
-	})
-
-	t.Run("nil pointer model", func(t *testing.T) {
-		t.Parallel()
-		var m *userModel
-		_, err := c.EncryptModel(ctx, schema, m)
-		if err == nil {
-			t.Fatal("expected error for nil pointer model")
-		}
-	})
+	_, err := c.EncryptModel(ctx, schema, userModel{})
+	if err == nil {
+		t.Fatal("expected error for closed client")
+	}
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
 }
 
-// --- Input validation tests for DecryptModel ---
-
-func TestDecryptModelValidation(t *testing.T) {
+func TestDecryptModelClientClosed(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	c := &Client{}
 	schema := &TableDef{name: "users", columns: map[string]Column{}}
-	data := map[string]any{"id": 1}
 
-	t.Run("nil dest", func(t *testing.T) {
-		t.Parallel()
-		err := c.DecryptModel(ctx, schema, data, nil)
-		if err == nil {
-			t.Fatal("expected error for nil dest")
-		}
-	})
-
-	t.Run("non-pointer dest", func(t *testing.T) {
-		t.Parallel()
-		err := c.DecryptModel(ctx, schema, data, userModel{})
-		if err == nil {
-			t.Fatal("expected error for non-pointer dest")
-		}
-	})
-
-	t.Run("pointer to non-struct", func(t *testing.T) {
-		t.Parallel()
-		s := "string"
-		err := c.DecryptModel(ctx, schema, data, &s)
-		if err == nil {
-			t.Fatal("expected error for pointer to string")
-		}
-	})
+	err := c.DecryptModel(ctx, schema, map[string]any{"id": 1}, &userModel{})
+	if err == nil {
+		t.Fatal("expected error for closed client")
+	}
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
 }
 
-// --- Input validation tests for BulkEncryptModels ---
-
-func TestBulkEncryptModelsValidation(t *testing.T) {
+func TestBulkEncryptModelsClientClosed(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	c := &Client{}
 	schema := &TableDef{name: "users", columns: map[string]Column{}}
 
-	t.Run("nil models", func(t *testing.T) {
-		t.Parallel()
-		_, err := c.BulkEncryptModels(ctx, schema, nil)
-		if err == nil {
-			t.Fatal("expected error for nil models")
-		}
-	})
-
-	t.Run("non-slice models", func(t *testing.T) {
-		t.Parallel()
-		_, err := c.BulkEncryptModels(ctx, schema, "not a slice")
-		if err == nil {
-			t.Fatal("expected error for non-slice models")
-		}
-	})
-
-	t.Run("empty slice returns empty result", func(t *testing.T) {
-		t.Parallel()
-		result, err := c.BulkEncryptModels(ctx, schema, []userModel{})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(result) != 0 {
-			t.Errorf("expected empty result, got %d items", len(result))
-		}
-	})
+	_, err := c.BulkEncryptModels(ctx, schema, []userModel{{ID: 1}})
+	if err == nil {
+		t.Fatal("expected error for closed client")
+	}
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
 }
 
-// --- Input validation tests for BulkDecryptModels ---
-
-func TestBulkDecryptModelsValidation(t *testing.T) {
+func TestBulkDecryptModelsClientClosed(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	c := &Client{}
 	schema := &TableDef{name: "users", columns: map[string]Column{}}
-	data := []map[string]any{{"id": 1}}
 
-	t.Run("nil dest", func(t *testing.T) {
-		t.Parallel()
-		err := c.BulkDecryptModels(ctx, schema, data, nil)
-		if err == nil {
-			t.Fatal("expected error for nil dest")
-		}
-	})
-
-	t.Run("non-pointer dest", func(t *testing.T) {
-		t.Parallel()
-		err := c.BulkDecryptModels(ctx, schema, data, []userModel{})
-		if err == nil {
-			t.Fatal("expected error for non-pointer dest")
-		}
-	})
-
-	t.Run("pointer to non-slice", func(t *testing.T) {
-		t.Parallel()
-		var u userModel
-		err := c.BulkDecryptModels(ctx, schema, data, &u)
-		if err == nil {
-			t.Fatal("expected error for pointer to struct")
-		}
-	})
+	var users []userModel
+	err := c.BulkDecryptModels(ctx, schema, []map[string]any{{"id": 1}}, &users)
+	if err == nil {
+		t.Fatal("expected error for closed client")
+	}
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
 }
 
 // --- Struct with no encrypted fields ---

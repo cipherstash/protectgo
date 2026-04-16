@@ -61,7 +61,7 @@ func TestCastAsConstants(t *testing.T) {
 		{"Number", CastAsNumber, "number"},
 		{"String", CastAsString, "string"},
 		{"Text", CastAsText, "text"},
-		{"Json", CastAsJson, "json"},
+		{"JSON", CastAsJSON, "json"},
 	}
 
 	for _, tc := range tests {
@@ -576,7 +576,7 @@ func TestErrorUnknownMessage(t *testing.T) {
 
 	err := newError("Test", "something completely unexpected happened")
 
-	// Should not match any sentinel.
+	// Should not match specific sentinels.
 	if errors.Is(err, ErrUnknownColumn) {
 		t.Error("should not match ErrUnknownColumn")
 	}
@@ -584,13 +584,17 @@ func TestErrorUnknownMessage(t *testing.T) {
 		t.Error("should not match ErrMissingIndex")
 	}
 
-	// The wrapped Err should be nil.
+	// Should match the generic FFI sentinel.
+	if !errors.Is(err, ErrFFI) {
+		t.Error("should match ErrFFI for unclassified FFI errors")
+	}
+
 	var protectErr *Error
 	if !errors.As(err, &protectErr) {
 		t.Fatal("errors.As should match *Error")
 	}
-	if protectErr.Err != nil {
-		t.Errorf("Err: got %v, want nil", protectErr.Err)
+	if protectErr.Err != ErrFFI {
+		t.Errorf("Err: got %v, want ErrFFI", protectErr.Err)
 	}
 }
 
