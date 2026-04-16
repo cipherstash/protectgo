@@ -51,11 +51,19 @@ func analyzeStruct(typ reflect.Type) (*modelInfo, error) {
 		csTag, hasCS := field.Tag.Lookup("cs")
 
 		if hasCS && csTag != "-" && csTag != "" {
-			info.EncryptedFields = append(info.EncryptedFields, modelField{
-				Index:  i,
-				Column: csTag,
-				MapKey: mapKey,
-			})
+			columnName := strings.Split(csTag, ",")[0]
+			if columnName != "" && columnName != "-" {
+				info.EncryptedFields = append(info.EncryptedFields, modelField{
+					Index:  i,
+					Column: columnName,
+					MapKey: mapKey,
+				})
+			} else {
+				info.PlainFields = append(info.PlainFields, modelField{
+					Index:  i,
+					MapKey: mapKey,
+				})
+			}
 		} else {
 			info.PlainFields = append(info.PlainFields, modelField{
 				Index:  i,
