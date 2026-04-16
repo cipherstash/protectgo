@@ -116,7 +116,6 @@ func TestExtractParams(t *testing.T) {
 func TestParseColumnSimple(t *testing.T) {
 	t.Parallel()
 
-	// No directives, string field → CastAsString, no indexes.
 	col := parseColumn(nil, reflect.TypeOf(""))
 	if col.CastAs == nil || *col.CastAs != CastAsString {
 		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsString)
@@ -203,14 +202,12 @@ func TestParseColumnMatchCustomOpts(t *testing.T) {
 	if mi.Tokenizer.Kind != "standard" {
 		t.Errorf("tokenizer: got %q, want %q", mi.Tokenizer.Kind, "standard")
 	}
-	// Standard tokenizer should not have token_length.
 	if mi.Tokenizer.TokenLength != nil {
 		t.Errorf("token_length: got %v, want nil for standard tokenizer", mi.Tokenizer.TokenLength)
 	}
 	if *mi.K != 8 {
 		t.Errorf("k: got %d, want 8", *mi.K)
 	}
-	// m should still be the default.
 	if *mi.M != 2048 {
 		t.Errorf("m: got %d, want 2048", *mi.M)
 	}
@@ -247,14 +244,13 @@ func TestParseColumnOreIndex(t *testing.T) {
 func TestParseColumnSteVec(t *testing.T) {
 	t.Parallel()
 
-	col := parseColumn([]string{"ste_vec(prefix=users/profile)"}, reflect.TypeOf((*interface{})(nil)).Elem())
+	col := parseColumn([]string{"ste_vec(prefix=users/profile)"}, reflect.TypeOf((*any)(nil)).Elem())
 	if col.Indexes == nil || col.Indexes.SteVecIndex == nil {
 		t.Fatal("expected ste_vec index")
 	}
 	if col.Indexes.SteVecIndex.Prefix != "users/profile" {
 		t.Errorf("prefix: got %q, want %q", col.Indexes.SteVecIndex.Prefix, "users/profile")
 	}
-	// SteVec should auto-set cast to json.
 	if col.CastAs == nil || *col.CastAs != CastAsJson {
 		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsJson)
 	}
@@ -302,9 +298,9 @@ func TestInferCastAs(t *testing.T) {
 		{"float32", reflect.TypeOf(float32(0)), CastAsNumber},
 		{"float64", reflect.TypeOf(float64(0)), CastAsNumber},
 		{"bool", reflect.TypeOf(false), CastAsBoolean},
-		{"map", reflect.TypeOf(map[string]interface{}{}), CastAsJson},
+		{"map", reflect.TypeOf(map[string]any{}), CastAsJson},
 		{"slice", reflect.TypeOf([]string{}), CastAsJson},
-		{"interface", reflect.TypeOf((*interface{})(nil)).Elem(), CastAsJson},
+		{"interface", reflect.TypeOf((*any)(nil)).Elem(), CastAsJson},
 		{"*string", reflect.TypeOf((*string)(nil)), CastAsString},
 		{"*int", reflect.TypeOf((*int)(nil)), CastAsNumber},
 		{"*bool", reflect.TypeOf((*bool)(nil)), CastAsBoolean},
@@ -326,7 +322,6 @@ func TestInferCastAs(t *testing.T) {
 func TestCastOverrideBeatsInference(t *testing.T) {
 	t.Parallel()
 
-	// String field with explicit cast=number.
 	col := parseColumn([]string{"cast=number"}, reflect.TypeOf(""))
 	if col.CastAs == nil || *col.CastAs != CastAsNumber {
 		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsNumber)
@@ -348,19 +343,22 @@ type schemaTestUser struct {
 func TestTableSchemaFullStruct(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("users", schemaTestUser{})
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
 
-	if td.Name != "users" {
-		t.Errorf("table name: got %q, want %q", td.Name, "users")
+	if td.Name() != "users" {
+		t.Errorf("table name: got %q, want %q", td.Name(), "users")
 	}
 
 	// Should have 5 encrypted columns: email, name, age, active, profile.
-	if len(td.Columns) != 5 {
-		t.Fatalf("columns count: got %d, want 5 (columns: %v)", len(td.Columns), columnNames(td.Columns))
+	if len(td.columns) != 5 {
+		t.Fatalf("columns count: got %d, want 5 (columns: %v)", len(td.columns), columnNames(td.columns))
 	}
 
 	// Verify email column.
-	email, ok := td.Columns["email"]
+	email, ok := td.columns["email"]
 	if !ok {
 		t.Fatal("missing email column")
 	}
@@ -378,7 +376,7 @@ func TestTableSchemaFullStruct(t *testing.T) {
 	}
 
 	// Verify age column.
-	age, ok := td.Columns["age"]
+	age, ok := td.columns["age"]
 	if !ok {
 		t.Fatal("missing age column")
 	}
@@ -390,7 +388,7 @@ func TestTableSchemaFullStruct(t *testing.T) {
 	}
 
 	// Verify profile column.
-	profile, ok := td.Columns["profile"]
+	profile, ok := td.columns["profile"]
 	if !ok {
 		t.Fatal("missing profile column")
 	}
@@ -405,7 +403,7 @@ func TestTableSchemaFullStruct(t *testing.T) {
 	}
 
 	// Verify "Role" is not present (no cs tag).
-	if _, ok := td.Columns["role"]; ok {
+	if _, ok := td.columns["role"]; ok {
 		t.Error("role should not be in columns (no cs tag)")
 	}
 }
@@ -413,12 +411,16 @@ func TestTableSchemaFullStruct(t *testing.T) {
 func TestTableSchemaPointerModel(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("users", &schemaTestUser{})
-	if td.Name != "users" {
-		t.Errorf("table name: got %q, want %q", td.Name, "users")
+	td, err := TableSchema("users", &schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
 	}
-	if len(td.Columns) != 5 {
-		t.Errorf("columns count: got %d, want 5", len(td.Columns))
+
+	if td.Name() != "users" {
+		t.Errorf("table name: got %q, want %q", td.Name(), "users")
+	}
+	if len(td.columns) != 5 {
+		t.Errorf("columns count: got %d, want 5", len(td.columns))
 	}
 }
 
@@ -430,41 +432,79 @@ type noCSTagSchema struct {
 func TestTableSchemaNoCSTagsEmptyColumns(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("empty", noCSTagSchema{})
-	if len(td.Columns) != 0 {
-		t.Errorf("columns count: got %d, want 0", len(td.Columns))
+	td, err := TableSchema("empty", noCSTagSchema{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+	if len(td.columns) != 0 {
+		t.Errorf("columns count: got %d, want 0", len(td.columns))
 	}
 }
 
-func TestTableSchemaPanicsOnNonStruct(t *testing.T) {
+func TestTableSchemaReturnsErrorOnNonStruct(t *testing.T) {
 	t.Parallel()
+
+	_, err := TableSchema("test", "not a struct")
+	if err == nil {
+		t.Fatal("expected error for non-struct model")
+	}
+}
+
+func TestTableSchemaReturnsErrorOnNil(t *testing.T) {
+	t.Parallel()
+
+	_, err := TableSchema("test", nil)
+	if err == nil {
+		t.Fatal("expected error for nil model")
+	}
+}
+
+// --- ColumnRef tests ---
+
+func TestTableDefColumn(t *testing.T) {
+	t.Parallel()
+
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+
+	col := td.Column("email")
+	if col.table != "users" {
+		t.Errorf("table: got %q, want %q", col.table, "users")
+	}
+	if col.column != "email" {
+		t.Errorf("column: got %q, want %q", col.column, "email")
+	}
+}
+
+func TestTableDefColumnPanicsOnUnknown(t *testing.T) {
+	t.Parallel()
+
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
 
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected panic for non-struct model")
+			t.Fatal("expected panic for unknown column")
 		}
 	}()
-	TableSchema("test", "not a struct")
+	td.Column("nonexistent")
 }
 
-func TestTableSchemaPanicsOnNil(t *testing.T) {
+// --- buildEncryptConfigFromSchemas tests ---
+
+func TestBuildEncryptConfigFromSchemasSingleTable(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for nil model")
-		}
-	}()
-	TableSchema("test", nil)
-}
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
 
-// --- BuildEncryptConfig tests ---
-
-func TestBuildEncryptConfigSingleTable(t *testing.T) {
-	t.Parallel()
-
-	td := TableSchema("users", schemaTestUser{})
-	config := BuildEncryptConfig(td)
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
 
 	if config.Version != 1 {
 		t.Errorf("version: got %d, want 1", config.Version)
@@ -483,12 +523,19 @@ type schemaTestProduct struct {
 	Price int    `json:"price" cs:"price,cast=number,ore"`
 }
 
-func TestBuildEncryptConfigMultipleTables(t *testing.T) {
+func TestBuildEncryptConfigFromSchemasMultipleTables(t *testing.T) {
 	t.Parallel()
 
-	users := TableSchema("users", schemaTestUser{})
-	products := TableSchema("products", schemaTestProduct{})
-	config := BuildEncryptConfig(users, products)
+	users, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema users: %v", err)
+	}
+	products, err := TableSchema("products", schemaTestProduct{})
+	if err != nil {
+		t.Fatalf("TableSchema products: %v", err)
+	}
+
+	config := buildEncryptConfigFromSchemas([]*TableDef{users, products})
 
 	if len(config.Tables) != 2 {
 		t.Fatalf("tables count: got %d, want 2", len(config.Tables))
@@ -511,9 +558,12 @@ type skipDashSchema struct {
 func TestTableSchemaSkipDashTag(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("test", skipDashSchema{})
-	if len(td.Columns) != 0 {
-		t.Errorf("columns count: got %d, want 0", len(td.Columns))
+	td, err := TableSchema("test", skipDashSchema{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+	if len(td.columns) != 0 {
+		t.Errorf("columns count: got %d, want 0", len(td.columns))
 	}
 }
 
@@ -525,9 +575,12 @@ type emptyCSSchema struct {
 func TestTableSchemaSkipEmptyTag(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("test", emptyCSSchema{})
-	if len(td.Columns) != 0 {
-		t.Errorf("columns count: got %d, want 0", len(td.Columns))
+	td, err := TableSchema("test", emptyCSSchema{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+	if len(td.columns) != 0 {
+		t.Errorf("columns count: got %d, want 0", len(td.columns))
 	}
 }
 
@@ -541,11 +594,14 @@ type unexportedSchema struct {
 func TestTableSchemaSkipsUnexportedFields(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("test", unexportedSchema{})
-	if len(td.Columns) != 1 {
-		t.Errorf("columns count: got %d, want 1", len(td.Columns))
+	td, err := TableSchema("test", unexportedSchema{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
 	}
-	if _, ok := td.Columns["email"]; !ok {
+	if len(td.columns) != 1 {
+		t.Errorf("columns count: got %d, want 1", len(td.columns))
+	}
+	if _, ok := td.columns["email"]; !ok {
 		t.Error("missing email column")
 	}
 }
@@ -560,19 +616,22 @@ type pointerFieldSchema struct {
 func TestTableSchemaPointerFieldTypeInference(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("test", pointerFieldSchema{})
+	td, err := TableSchema("test", pointerFieldSchema{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
 
-	email := td.Columns["email"]
+	email := td.columns["email"]
 	if *email.CastAs != CastAsString {
 		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsString)
 	}
 
-	age := td.Columns["age"]
+	age := td.columns["age"]
 	if *age.CastAs != CastAsNumber {
 		t.Errorf("age cast_as: got %q, want %q", *age.CastAs, CastAsNumber)
 	}
 
-	ok := td.Columns["ok"]
+	ok := td.columns["ok"]
 	if *ok.CastAs != CastAsBoolean {
 		t.Errorf("ok cast_as: got %q, want %q", *ok.CastAs, CastAsBoolean)
 	}
@@ -588,37 +647,37 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 		Age   int    `json:"age" cs:"age,cast=number,ore"`
 	}
 
-	td := TableSchema("users", simpleModel{})
-	config := BuildEncryptConfig(td)
+	td, err := TableSchema("users", simpleModel{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
 
 	data, err := json.Marshal(config)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
-	// Unmarshal into a generic map to verify structure.
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
 
-	// Verify top-level structure.
 	if v, ok := result["v"]; !ok || v != float64(1) {
 		t.Errorf("version: got %v, want 1", result["v"])
 	}
 
-	tables, ok := result["tables"].(map[string]interface{})
+	tables, ok := result["tables"].(map[string]any)
 	if !ok {
 		t.Fatal("tables: not a map")
 	}
 
-	users, ok := tables["users"].(map[string]interface{})
+	users, ok := tables["users"].(map[string]any)
 	if !ok {
 		t.Fatal("users table: not a map")
 	}
 
-	// Verify email column has unique and match indexes.
-	emailCol, ok := users["email"].(map[string]interface{})
+	emailCol, ok := users["email"].(map[string]any)
 	if !ok {
 		t.Fatal("email column: not a map")
 	}
@@ -626,7 +685,7 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 		t.Errorf("email cast_as: got %v, want %q", emailCol["cast_as"], "string")
 	}
 
-	emailIndexes, ok := emailCol["indexes"].(map[string]interface{})
+	emailIndexes, ok := emailCol["indexes"].(map[string]any)
 	if !ok {
 		t.Fatal("email indexes: not a map")
 	}
@@ -637,8 +696,7 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 		t.Error("email: missing match index in JSON")
 	}
 
-	// Verify age column has ore index.
-	ageCol, ok := users["age"].(map[string]interface{})
+	ageCol, ok := users["age"].(map[string]any)
 	if !ok {
 		t.Fatal("age column: not a map")
 	}
@@ -646,7 +704,7 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 		t.Errorf("age cast_as: got %v, want %q", ageCol["cast_as"], "number")
 	}
 
-	ageIndexes, ok := ageCol["indexes"].(map[string]interface{})
+	ageIndexes, ok := ageCol["indexes"].(map[string]any)
 	if !ok {
 		t.Fatal("age indexes: not a map")
 	}
@@ -660,15 +718,17 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 func TestBuildEncryptConfigIntegration(t *testing.T) {
 	t.Parallel()
 
-	td := TableSchema("users", schemaTestUser{})
-	config := BuildEncryptConfig(td)
+	td, err := TableSchema("users", schemaTestUser{})
+	if err != nil {
+		t.Fatalf("TableSchema: %v", err)
+	}
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
 
 	data, err := json.Marshal(config)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
-	// Unmarshal back into EncryptConfig to verify round-trip.
 	var roundTripped EncryptConfig
 	if err := json.Unmarshal(data, &roundTripped); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
@@ -686,7 +746,6 @@ func TestBuildEncryptConfigIntegration(t *testing.T) {
 		t.Fatalf("user columns: got %d, want 5", len(usersTable))
 	}
 
-	// Verify match index on email survived round-trip.
 	email := usersTable["email"]
 	if email.Indexes == nil || email.Indexes.MatchIndex == nil {
 		t.Fatal("email match index lost in round-trip")
@@ -709,7 +768,6 @@ func TestAnalyzeStructWithExtendedTags(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// analyzeStruct should extract just the column name from the extended tag.
 	if len(info.EncryptedFields) != 5 {
 		t.Fatalf("encrypted fields: got %d, want 5", len(info.EncryptedFields))
 	}
@@ -761,6 +819,132 @@ func TestSplitTagParts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- Programmatic SchemaBuilder tests ---
+
+func TestSchemaBuilderBasic(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("users").
+		Column("email", CastAsString).Equality(TokenFilter{Kind: "downcase"}).FreeTextSearch().Done().
+		Column("name", CastAsString).FreeTextSearch().Done().
+		Column("age", CastAsNumber).OrderAndRange().Done().
+		Build()
+
+	if td.Name() != "users" {
+		t.Errorf("name: got %q, want %q", td.Name(), "users")
+	}
+	if len(td.columns) != 3 {
+		t.Fatalf("columns: got %d, want 3", len(td.columns))
+	}
+
+	// Verify email
+	email := td.columns["email"]
+	if *email.CastAs != CastAsString {
+		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsString)
+	}
+	if email.Indexes == nil || email.Indexes.UniqueIndex == nil {
+		t.Fatal("email: expected unique index")
+	}
+	if len(email.Indexes.UniqueIndex.TokenFilters) != 1 || email.Indexes.UniqueIndex.TokenFilters[0].Kind != "downcase" {
+		t.Errorf("email unique token filters: %v", email.Indexes.UniqueIndex.TokenFilters)
+	}
+	if email.Indexes.MatchIndex == nil {
+		t.Error("email: expected match index")
+	}
+
+	// Verify age
+	age := td.columns["age"]
+	if *age.CastAs != CastAsNumber {
+		t.Errorf("age cast_as: got %q, want %q", *age.CastAs, CastAsNumber)
+	}
+	if age.Indexes == nil || age.Indexes.OreIndex == nil {
+		t.Error("age: expected ore index")
+	}
+}
+
+func TestSchemaBuilderSearchableJSON(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("data").
+		Column("metadata", CastAsString).SearchableJSON("data/metadata").Done().
+		Build()
+
+	meta := td.columns["metadata"]
+	if *meta.CastAs != CastAsJson {
+		t.Errorf("cast_as: got %q, want %q", *meta.CastAs, CastAsJson)
+	}
+	if meta.Indexes == nil || meta.Indexes.SteVecIndex == nil {
+		t.Fatal("expected ste_vec index")
+	}
+	if meta.Indexes.SteVecIndex.Prefix != "data/metadata" {
+		t.Errorf("prefix: got %q, want %q", meta.Indexes.SteVecIndex.Prefix, "data/metadata")
+	}
+}
+
+func TestSchemaBuilderFreeTextSearchWithOptions(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("users").
+		Column("bio", CastAsText).FreeTextSearch(WithK(8), WithM(4096), WithTokenizer("standard")).Done().
+		Build()
+
+	bio := td.columns["bio"]
+	if bio.Indexes == nil || bio.Indexes.MatchIndex == nil {
+		t.Fatal("expected match index")
+	}
+	mi := bio.Indexes.MatchIndex
+	if *mi.K != 8 {
+		t.Errorf("k: got %d, want 8", *mi.K)
+	}
+	if *mi.M != 4096 {
+		t.Errorf("m: got %d, want 4096", *mi.M)
+	}
+	if mi.Tokenizer == nil || mi.Tokenizer.Kind != "standard" {
+		t.Errorf("tokenizer: got %v, want standard", mi.Tokenizer)
+	}
+}
+
+func TestSchemaBuilderColumnRef(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("orders").
+		Column("total", CastAsNumber).OrderAndRange().Done().
+		Build()
+
+	col := td.Column("total")
+	if col.table != "orders" || col.column != "total" {
+		t.Errorf("ColumnRef: got table=%q column=%q", col.table, col.column)
+	}
+}
+
+func TestSchemaBuilderMatchDefaults(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("t").
+		Column("c", CastAsString).FreeTextSearch().Done().
+		Build()
+
+	mi := td.columns["c"].Indexes.MatchIndex
+	if mi == nil {
+		t.Fatal("expected match index")
+	}
+	if mi.Tokenizer == nil || mi.Tokenizer.Kind != "ngram" {
+		t.Errorf("tokenizer: got %v, want ngram", mi.Tokenizer)
+	}
+	if mi.Tokenizer.TokenLength == nil || *mi.Tokenizer.TokenLength != 3 {
+		t.Errorf("token_length: got %v, want 3", mi.Tokenizer.TokenLength)
+	}
+	if *mi.K != 6 {
+		t.Errorf("k: got %d, want 6", *mi.K)
+	}
+	if *mi.M != 2048 {
+		t.Errorf("m: got %d, want 2048", *mi.M)
+	}
+	if *mi.IncludeOriginal != true {
+		t.Errorf("include_original: got %v, want true", *mi.IncludeOriginal)
 	}
 }
 

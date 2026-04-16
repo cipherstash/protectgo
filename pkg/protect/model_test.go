@@ -1,6 +1,7 @@
 package protect
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -60,14 +61,14 @@ func TestAnalyzeStruct(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		typ               reflect.Type
-		wantEncrypted     int
-		wantPlain         int
-		wantErr           bool
-		encryptedColumns  []string
-		encryptedMapKeys  []string
-		plainMapKeys      []string
+		name             string
+		typ              reflect.Type
+		wantEncrypted    int
+		wantPlain        int
+		wantErr          bool
+		encryptedColumns []string
+		encryptedMapKeys []string
+		plainMapKeys     []string
 	}{
 		{
 			name:             "basic user model",
@@ -87,11 +88,11 @@ func TestAnalyzeStruct(t *testing.T) {
 			plainMapKeys:     []string{"id"},
 		},
 		{
-			name:         "no cs tags",
-			typ:          reflect.TypeOf(noCSTagModel{}),
+			name:          "no cs tags",
+			typ:           reflect.TypeOf(noCSTagModel{}),
 			wantEncrypted: 0,
-			wantPlain:    2,
-			plainMapKeys: []string{"id", "name"},
+			wantPlain:     2,
+			plainMapKeys:  []string{"id", "name"},
 		},
 		{
 			name:             "cs skip tag",
@@ -102,10 +103,10 @@ func TestAnalyzeStruct(t *testing.T) {
 			plainMapKeys:     []string{"id", "skip"},
 		},
 		{
-			name:         "empty struct",
-			typ:          reflect.TypeOf(emptyModel{}),
+			name:          "empty struct",
+			typ:           reflect.TypeOf(emptyModel{}),
 			wantEncrypted: 0,
-			wantPlain:    0,
+			wantPlain:     0,
 		},
 		{
 			name:             "pointer to struct",
@@ -453,7 +454,7 @@ func TestToEncrypted(t *testing.T) {
 		t.Parallel()
 		ct := "cipher"
 		enc := &Encrypted{
-			Identifier: NewIdentifier("users", "email"),
+			Identifier: Identifier{Table: "users", Column: "email"},
 			Version:    1,
 			Ciphertext: &ct,
 		}
@@ -470,7 +471,7 @@ func TestToEncrypted(t *testing.T) {
 		t.Parallel()
 		ct := "cipher"
 		enc := Encrypted{
-			Identifier: NewIdentifier("users", "email"),
+			Identifier: Identifier{Table: "users", Column: "email"},
 			Version:    1,
 			Ciphertext: &ct,
 		}
@@ -485,8 +486,8 @@ func TestToEncrypted(t *testing.T) {
 
 	t.Run("from map (JSON deserialized)", func(t *testing.T) {
 		t.Parallel()
-		m := map[string]interface{}{
-			"i": map[string]interface{}{
+		m := map[string]any{
+			"i": map[string]any{
 				"t": "users",
 				"c": "email",
 			},
@@ -510,8 +511,6 @@ func TestToEncrypted(t *testing.T) {
 
 	t.Run("from invalid type returns error", func(t *testing.T) {
 		t.Parallel()
-		// A string cannot be unmarshaled into Encrypted, but it can be marshaled.
-		// The unmarshal will fail because a bare string is not a JSON object.
 		_, err := toEncrypted("not-a-map")
 		if err == nil {
 			t.Fatal("expected error for invalid type")
@@ -524,12 +523,13 @@ func TestToEncrypted(t *testing.T) {
 func TestEncryptModelValidation(t *testing.T) {
 	t.Parallel()
 
-	// We use a nil client since validation happens before any FFI call.
+	ctx := context.Background()
 	c := &Client{}
+	schema := &TableDef{name: "users", columns: map[string]Column{}}
 
 	t.Run("nil model", func(t *testing.T) {
 		t.Parallel()
-		_, err := c.EncryptModel(nil, "users")
+		_, err := c.EncryptModel(ctx, schema, nil)
 		if err == nil {
 			t.Fatal("expected error for nil model")
 		}
@@ -537,7 +537,7 @@ func TestEncryptModelValidation(t *testing.T) {
 
 	t.Run("non-struct model", func(t *testing.T) {
 		t.Parallel()
-		_, err := c.EncryptModel("not a struct", "users")
+		_, err := c.EncryptModel(ctx, schema, "not a struct")
 		if err == nil {
 			t.Fatal("expected error for string model")
 		}
@@ -545,7 +545,7 @@ func TestEncryptModelValidation(t *testing.T) {
 
 	t.Run("slice model", func(t *testing.T) {
 		t.Parallel()
-		_, err := c.EncryptModel([]string{"a"}, "users")
+		_, err := c.EncryptModel(ctx, schema, []string{"a"})
 		if err == nil {
 			t.Fatal("expected error for slice model")
 		}
@@ -554,7 +554,7 @@ func TestEncryptModelValidation(t *testing.T) {
 	t.Run("nil pointer model", func(t *testing.T) {
 		t.Parallel()
 		var m *userModel
-		_, err := c.EncryptModel(m, "users")
+		_, err := c.EncryptModel(ctx, schema, m)
 		if err == nil {
 			t.Fatal("expected error for nil pointer model")
 		}
@@ -566,12 +566,14 @@ func TestEncryptModelValidation(t *testing.T) {
 func TestDecryptModelValidation(t *testing.T) {
 	t.Parallel()
 
+	ctx := context.Background()
 	c := &Client{}
-	data := map[string]interface{}{"id": 1}
+	schema := &TableDef{name: "users", columns: map[string]Column{}}
+	data := map[string]any{"id": 1}
 
 	t.Run("nil dest", func(t *testing.T) {
 		t.Parallel()
-		err := c.DecryptModel(data, "users", nil)
+		err := c.DecryptModel(ctx, schema, data, nil)
 		if err == nil {
 			t.Fatal("expected error for nil dest")
 		}
@@ -579,7 +581,7 @@ func TestDecryptModelValidation(t *testing.T) {
 
 	t.Run("non-pointer dest", func(t *testing.T) {
 		t.Parallel()
-		err := c.DecryptModel(data, "users", userModel{})
+		err := c.DecryptModel(ctx, schema, data, userModel{})
 		if err == nil {
 			t.Fatal("expected error for non-pointer dest")
 		}
@@ -588,7 +590,7 @@ func TestDecryptModelValidation(t *testing.T) {
 	t.Run("pointer to non-struct", func(t *testing.T) {
 		t.Parallel()
 		s := "string"
-		err := c.DecryptModel(data, "users", &s)
+		err := c.DecryptModel(ctx, schema, data, &s)
 		if err == nil {
 			t.Fatal("expected error for pointer to string")
 		}
@@ -600,11 +602,13 @@ func TestDecryptModelValidation(t *testing.T) {
 func TestBulkEncryptModelsValidation(t *testing.T) {
 	t.Parallel()
 
+	ctx := context.Background()
 	c := &Client{}
+	schema := &TableDef{name: "users", columns: map[string]Column{}}
 
 	t.Run("nil models", func(t *testing.T) {
 		t.Parallel()
-		_, err := c.BulkEncryptModels(nil, "users")
+		_, err := c.BulkEncryptModels(ctx, schema, nil)
 		if err == nil {
 			t.Fatal("expected error for nil models")
 		}
@@ -612,7 +616,7 @@ func TestBulkEncryptModelsValidation(t *testing.T) {
 
 	t.Run("non-slice models", func(t *testing.T) {
 		t.Parallel()
-		_, err := c.BulkEncryptModels("not a slice", "users")
+		_, err := c.BulkEncryptModels(ctx, schema, "not a slice")
 		if err == nil {
 			t.Fatal("expected error for non-slice models")
 		}
@@ -620,7 +624,7 @@ func TestBulkEncryptModelsValidation(t *testing.T) {
 
 	t.Run("empty slice returns empty result", func(t *testing.T) {
 		t.Parallel()
-		result, err := c.BulkEncryptModels([]userModel{}, "users")
+		result, err := c.BulkEncryptModels(ctx, schema, []userModel{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -635,12 +639,14 @@ func TestBulkEncryptModelsValidation(t *testing.T) {
 func TestBulkDecryptModelsValidation(t *testing.T) {
 	t.Parallel()
 
+	ctx := context.Background()
 	c := &Client{}
-	data := []map[string]interface{}{{"id": 1}}
+	schema := &TableDef{name: "users", columns: map[string]Column{}}
+	data := []map[string]any{{"id": 1}}
 
 	t.Run("nil dest", func(t *testing.T) {
 		t.Parallel()
-		err := c.BulkDecryptModels(data, "users", nil)
+		err := c.BulkDecryptModels(ctx, schema, data, nil)
 		if err == nil {
 			t.Fatal("expected error for nil dest")
 		}
@@ -648,7 +654,7 @@ func TestBulkDecryptModelsValidation(t *testing.T) {
 
 	t.Run("non-pointer dest", func(t *testing.T) {
 		t.Parallel()
-		err := c.BulkDecryptModels(data, "users", []userModel{})
+		err := c.BulkDecryptModels(ctx, schema, data, []userModel{})
 		if err == nil {
 			t.Fatal("expected error for non-pointer dest")
 		}
@@ -657,14 +663,14 @@ func TestBulkDecryptModelsValidation(t *testing.T) {
 	t.Run("pointer to non-slice", func(t *testing.T) {
 		t.Parallel()
 		var u userModel
-		err := c.BulkDecryptModels(data, "users", &u)
+		err := c.BulkDecryptModels(ctx, schema, data, &u)
 		if err == nil {
 			t.Fatal("expected error for pointer to struct")
 		}
 	})
 }
 
-// --- Struct with no encrypted fields (should pass through everything) ---
+// --- Struct with no encrypted fields ---
 
 func TestAnalyzeStructNoEncryptedFields(t *testing.T) {
 	t.Parallel()
@@ -677,7 +683,6 @@ func TestAnalyzeStructNoEncryptedFields(t *testing.T) {
 	if len(info.EncryptedFields) != 0 {
 		t.Errorf("expected 0 encrypted fields, got %d", len(info.EncryptedFields))
 	}
-
 	if len(info.PlainFields) != 2 {
 		t.Errorf("expected 2 plain fields, got %d", len(info.PlainFields))
 	}
@@ -696,12 +701,10 @@ func TestAnalyzeMixedModel(t *testing.T) {
 	if len(info.EncryptedFields) != 2 {
 		t.Errorf("expected 2 encrypted fields, got %d", len(info.EncryptedFields))
 	}
-
 	if len(info.PlainFields) != 3 {
 		t.Errorf("expected 3 plain fields (id, active, balance), got %d", len(info.PlainFields))
 	}
 
-	// Verify the encrypted fields are the correct ones.
 	expectedColumns := map[string]bool{"email": true, "name": true}
 	for _, ef := range info.EncryptedFields {
 		if !expectedColumns[ef.Column] {
@@ -720,16 +723,13 @@ func TestCSSkipTag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The Skip field with cs:"-" should be in PlainFields, not EncryptedFields.
 	if len(info.EncryptedFields) != 1 {
 		t.Errorf("expected 1 encrypted field, got %d", len(info.EncryptedFields))
 	}
-
 	if info.EncryptedFields[0].Column != "email" {
 		t.Errorf("expected encrypted column %q, got %q", "email", info.EncryptedFields[0].Column)
 	}
 
-	// PlainFields should be: ID and Skip
 	if len(info.PlainFields) != 2 {
 		t.Errorf("expected 2 plain fields, got %d", len(info.PlainFields))
 	}
@@ -764,8 +764,6 @@ func TestJSONTagWithOptions(t *testing.T) {
 	if len(info.EncryptedFields) != 1 {
 		t.Fatalf("expected 1 encrypted field, got %d", len(info.EncryptedFields))
 	}
-
-	// The map key should use the name part of the JSON tag, not the options.
 	if info.EncryptedFields[0].MapKey != "email" {
 		t.Errorf("map key: got %q, want %q", info.EncryptedFields[0].MapKey, "email")
 	}
@@ -773,13 +771,12 @@ func TestJSONTagWithOptions(t *testing.T) {
 	if len(info.PlainFields) != 1 {
 		t.Fatalf("expected 1 plain field, got %d", len(info.PlainFields))
 	}
-
 	if info.PlainFields[0].MapKey != "id" {
 		t.Errorf("map key: got %q, want %q", info.PlainFields[0].MapKey, "id")
 	}
 }
 
-// --- Test setFieldValue with various real struct scenarios ---
+// --- Test setFieldValue on struct ---
 
 func TestSetFieldValueOnStruct(t *testing.T) {
 	t.Parallel()
@@ -789,7 +786,7 @@ func TestSetFieldValueOnStruct(t *testing.T) {
 		var u userModel
 		v := reflect.ValueOf(&u).Elem()
 
-		setFieldValue(v.Field(0), float64(1)) // ID - float64 from JSON
+		setFieldValue(v.Field(0), float64(1)) // ID
 		setFieldValue(v.Field(3), "admin")    // Role
 
 		if u.ID != 1 {
@@ -805,7 +802,7 @@ func TestSetFieldValueOnStruct(t *testing.T) {
 		var m pointerFieldModel
 		v := reflect.ValueOf(&m).Elem()
 
-		setFieldValue(v.Field(0), float64(2))    // ID
+		setFieldValue(v.Field(0), float64(2))      // ID
 		setFieldValue(v.Field(1), "test@test.com") // Email *string
 
 		if m.ID != 2 {
@@ -838,13 +835,12 @@ func TestEmptyCSTag(t *testing.T) {
 	if len(info.EncryptedFields) != 0 {
 		t.Errorf("expected 0 encrypted fields for empty cs tag, got %d", len(info.EncryptedFields))
 	}
-
 	if len(info.PlainFields) != 2 {
 		t.Errorf("expected 2 plain fields, got %d", len(info.PlainFields))
 	}
 }
 
-// --- Test JSON tag "-" means field is excluded from JSON but still tracked as plain ---
+// --- Test JSON tag "-" means field falls back to snake_case ---
 
 type jsonSkipModel struct {
 	ID     int    `json:"-"`
@@ -860,12 +856,10 @@ func TestJSONSkipTag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// ID and Hidden have json:"-", so fieldMapKey falls back to snake_case.
 	if len(info.PlainFields) != 2 {
 		t.Fatalf("expected 2 plain fields, got %d", len(info.PlainFields))
 	}
 
-	// With json:"-", the name part is "-", which we reject, so it falls back to snake_case.
 	if info.PlainFields[0].MapKey != "i_d" {
 		t.Errorf("ID map key: got %q, want %q", info.PlainFields[0].MapKey, "i_d")
 	}

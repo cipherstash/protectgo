@@ -1,6 +1,7 @@
 package protect
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -105,7 +106,7 @@ func toSnakeCase(s string) string {
 
 // fieldPlaintext extracts the plaintext value from a struct field, handling pointer
 // types by dereferencing them. It returns the value and whether the field is nil.
-func fieldPlaintext(v reflect.Value) (interface{}, bool) {
+func fieldPlaintext(v reflect.Value) (any, bool) {
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
 			return nil, true
@@ -118,10 +119,11 @@ func fieldPlaintext(v reflect.Value) (interface{}, bool) {
 // EncryptModel encrypts the tagged fields of a struct and returns a map with
 // encrypted values for `cs`-tagged fields and original values for all other fields.
 //
-// The model parameter must be a struct (or pointer to struct). The table parameter
-// identifies the table in the encryption config. Each field with a `cs:"column_name"`
-// tag is encrypted using [Client.Encrypt]. Fields without the tag are copied as-is.
-func (c *Client) EncryptModel(model interface{}, table string) (map[string]interface{}, error) {
+// The model parameter must be a struct (or pointer to struct). The schema parameter
+// identifies the table and columns in the encryption config. Each field with a
+// `cs:"column_name"` tag is encrypted using [Client.Encrypt]. Fields without
+// the tag are copied as-is.
+func (c *Client) EncryptModel(ctx context.Context, schema *TableDef, model any) (map[string]any, error) {
 	v := reflect.ValueOf(model)
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -138,7 +140,7 @@ func (c *Client) EncryptModel(model interface{}, table string) (map[string]inter
 		return nil, fmt.Errorf("analyzing model: %w", err)
 	}
 
-	result := make(map[string]interface{}, len(info.EncryptedFields)+len(info.PlainFields))
+	result := make(map[string]any, len(info.EncryptedFields)+len(info.PlainFields))
 
 	// Copy plain fields.
 	for _, pf := range info.PlainFields {
@@ -153,11 +155,7 @@ func (c *Client) EncryptModel(model interface{}, table string) (map[string]inter
 			continue
 		}
 
-		encrypted, err := c.Encrypt(EncryptOptions{
-			Plaintext: plaintext,
-			Column:    ef.Column,
-			Table:     table,
-		})
+		encrypted, err := c.Encrypt(ctx, schema.Column(ef.Column), plaintext)
 		if err != nil {
 			return nil, fmt.Errorf("encrypting field %q (column %q): %w", ef.MapKey, ef.Column, err)
 		}
@@ -173,7 +171,7 @@ func (c *Client) EncryptModel(model interface{}, table string) (map[string]inter
 // a `cs:"column_name"` tag, the corresponding map value is treated as an [Encrypted]
 // payload, decrypted using [Client.Decrypt], and the resulting plaintext is set on the
 // field. Non-tagged fields are set directly from the map.
-func (c *Client) DecryptModel(data map[string]interface{}, table string, dest interface{}) error {
+func (c *Client) DecryptModel(ctx context.Context, schema *TableDef, data map[string]any, dest any) error {
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
 		return fmt.Errorf("dest must be a non-nil pointer to a struct")
@@ -209,9 +207,7 @@ func (c *Client) DecryptModel(data map[string]interface{}, table string, dest in
 			return fmt.Errorf("converting field %q to Encrypted: %w", ef.MapKey, err)
 		}
 
-		plaintext, err := c.Decrypt(DecryptOptions{
-			Ciphertext: encrypted,
-		})
+		plaintext, err := c.Decrypt(ctx, encrypted)
 		if err != nil {
 			return fmt.Errorf("decrypting field %q (column %q): %w", ef.MapKey, ef.Column, err)
 		}
@@ -227,7 +223,7 @@ func (c *Client) DecryptModel(data map[string]interface{}, table string, dest in
 // The models parameter must be a slice of structs (or pointer to slice). Each struct's
 // `cs`-tagged fields are collected into a single call to [Client.EncryptBulk], which is
 // significantly more efficient than calling [Client.EncryptModel] for each struct individually.
-func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[string]interface{}, error) {
+func (c *Client) BulkEncryptModels(ctx context.Context, schema *TableDef, models any) ([]map[string]any, error) {
 	sv := reflect.ValueOf(models)
 	if sv.Kind() == reflect.Ptr {
 		if sv.IsNil() {
@@ -239,7 +235,7 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 		return nil, fmt.Errorf("models must be a slice, got %s", sv.Kind())
 	}
 	if sv.Len() == 0 {
-		return []map[string]interface{}{}, nil
+		return []map[string]any{}, nil
 	}
 
 	elemType := sv.Type().Elem()
@@ -256,9 +252,9 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 	numEncFields := len(info.EncryptedFields)
 
 	// Build bulk plaintext payloads and result maps in one pass.
-	results := make([]map[string]interface{}, numModels)
-	var payloads []PlaintextPayload
-	// Track which payloads map to which result slot; -1 for nil/skipped fields.
+	results := make([]map[string]any, numModels)
+	var payloads []PlaintextItem
+	// Track which payloads map to which result slot.
 	type payloadPos struct {
 		modelIdx int
 		mapKey   string
@@ -275,7 +271,7 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 			elem = elem.Elem()
 		}
 
-		result := make(map[string]interface{}, numEncFields+len(info.PlainFields))
+		result := make(map[string]any, numEncFields+len(info.PlainFields))
 
 		// Copy plain fields.
 		for _, pf := range info.PlainFields {
@@ -289,10 +285,9 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 				result[ef.MapKey] = nil
 				continue
 			}
-			payloads = append(payloads, PlaintextPayload{
+			payloads = append(payloads, PlaintextItem{
 				Plaintext: plaintext,
-				Column:    ef.Column,
-				Table:     table,
+				Column:    schema.Column(ef.Column),
 			})
 			positions = append(positions, payloadPos{modelIdx: i, mapKey: ef.MapKey})
 		}
@@ -304,9 +299,7 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 		return results, nil
 	}
 
-	encrypted, err := c.EncryptBulk(EncryptBulkOptions{
-		Plaintexts: payloads,
-	})
+	encrypted, err := c.EncryptBulk(ctx, payloads)
 	if err != nil {
 		return nil, fmt.Errorf("bulk encrypting models: %w", err)
 	}
@@ -329,7 +322,7 @@ func (c *Client) BulkEncryptModels(models interface{}, table string) ([]map[stri
 // The dest parameter must be a pointer to a slice of structs. All encrypted values
 // across the maps are collected into a single call to [Client.DecryptBulk], which is
 // significantly more efficient than calling [Client.DecryptModel] for each map individually.
-func (c *Client) BulkDecryptModels(data []map[string]interface{}, table string, dest interface{}) error {
+func (c *Client) BulkDecryptModels(ctx context.Context, schema *TableDef, data []map[string]any, dest any) error {
 	dv := reflect.ValueOf(dest)
 	if dv.Kind() != reflect.Ptr || dv.IsNil() {
 		return fmt.Errorf("dest must be a non-nil pointer to a slice of structs")
@@ -356,7 +349,7 @@ func (c *Client) BulkDecryptModels(data []map[string]interface{}, table string, 
 		mapIdx   int
 		fieldIdx int // index into info.EncryptedFields
 	}
-	var ciphertexts []BulkDecryptPayload
+	var ciphertexts []*Encrypted
 	var positions []decryptPos
 
 	for i, m := range data {
@@ -369,9 +362,7 @@ func (c *Client) BulkDecryptModels(data []map[string]interface{}, table string, 
 			if err != nil {
 				return fmt.Errorf("converting field %q in map[%d] to Encrypted: %w", ef.MapKey, i, err)
 			}
-			ciphertexts = append(ciphertexts, BulkDecryptPayload{
-				Ciphertext: encrypted,
-			})
+			ciphertexts = append(ciphertexts, encrypted)
 			positions = append(positions, decryptPos{mapIdx: i, fieldIdx: j})
 		}
 	}
@@ -397,9 +388,7 @@ func (c *Client) BulkDecryptModels(data []map[string]interface{}, table string, 
 
 	// Bulk decrypt if there are any ciphertexts.
 	if len(ciphertexts) > 0 {
-		plaintexts, err := c.DecryptBulk(DecryptBulkOptions{
-			Ciphertexts: ciphertexts,
-		})
+		plaintexts, err := c.DecryptBulk(ctx, ciphertexts)
 		if err != nil {
 			return fmt.Errorf("bulk decrypting models: %w", err)
 		}
@@ -424,7 +413,7 @@ func (c *Client) BulkDecryptModels(data []map[string]interface{}, table string, 
 
 // toEncrypted converts a raw value (typically a map from JSON deserialization) into
 // an *Encrypted struct by marshaling to JSON and unmarshaling back.
-func toEncrypted(val interface{}) (*Encrypted, error) {
+func toEncrypted(val any) (*Encrypted, error) {
 	switch v := val.(type) {
 	case *Encrypted:
 		return v, nil
@@ -445,7 +434,7 @@ func toEncrypted(val interface{}) (*Encrypted, error) {
 
 // setFieldValue sets a struct field from an arbitrary value, handling type coercion
 // for common cases (e.g., JSON numbers to int fields, strings to string fields).
-func setFieldValue(field reflect.Value, val interface{}) {
+func setFieldValue(field reflect.Value, val any) {
 	if val == nil {
 		return
 	}
@@ -455,9 +444,6 @@ func setFieldValue(field reflect.Value, val interface{}) {
 
 	// Handle pointer fields.
 	if fieldType.Kind() == reflect.Ptr {
-		if val == nil {
-			return
-		}
 		elemType := fieldType.Elem()
 		ptr := reflect.New(elemType)
 		setFieldValue(ptr.Elem(), val)

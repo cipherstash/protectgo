@@ -7,27 +7,42 @@ import (
 	"strings"
 )
 
-// TableDef holds a parsed table schema ready for building an EncryptConfig.
+// TableDef holds a parsed table schema. It is the primary reference for
+// table and column identification throughout the API. Create one with
+// TableSchema (from struct tags) or NewSchema (programmatic builder).
 type TableDef struct {
-	Name    string
-	Columns map[string]Column
+	name    string
+	columns map[string]Column
 }
 
-// TableSchema creates a table schema definition from a struct type.
-// It parses the `cs` struct tags to determine column names, cast types, and indexes.
-// The model parameter can be a struct value or a pointer to a struct.
-// TableSchema panics if model is not a struct or pointer to struct, since this
-// indicates a programming error that should be caught during initialization.
-func TableSchema(tableName string, model interface{}) *TableDef {
+// Name returns the table name.
+func (td *TableDef) Name() string {
+	return td.name
+}
+
+// Column returns a ColumnRef for the named column in this table.
+// It panics if the column name is not defined in the schema, since
+// this indicates a programming error that should be caught at init time.
+func (td *TableDef) Column(name string) ColumnRef {
+	if _, ok := td.columns[name]; !ok {
+		panic(fmt.Sprintf("protect: column %q not found in table %q", name, td.name))
+	}
+	return ColumnRef{table: td.name, column: name}
+}
+
+// TableSchema creates a table schema definition by parsing `cs` struct tags
+// on the given model. The model parameter must be a struct value or pointer
+// to a struct.
+func TableSchema(tableName string, model any) (*TableDef, error) {
 	typ := reflect.TypeOf(model)
 	if typ == nil {
-		panic("protect.TableSchema: model must not be nil")
+		return nil, fmt.Errorf("protect.TableSchema: model must not be nil")
 	}
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
 	if typ.Kind() != reflect.Struct {
-		panic(fmt.Sprintf("protect.TableSchema: model must be a struct, got %s", typ.Kind()))
+		return nil, fmt.Errorf("protect.TableSchema: model must be a struct, got %s", typ.Kind())
 	}
 
 	columns := make(map[string]Column)
@@ -54,26 +69,153 @@ func TableSchema(tableName string, model interface{}) *TableDef {
 	}
 
 	return &TableDef{
-		Name:    tableName,
-		Columns: columns,
+		name:    tableName,
+		columns: columns,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Programmatic schema builder
+// ---------------------------------------------------------------------------
+
+// SchemaBuilder constructs a TableDef programmatically.
+type SchemaBuilder struct {
+	name    string
+	columns map[string]Column
+}
+
+// ColumnBuilder configures a single column within a SchemaBuilder.
+type ColumnBuilder struct {
+	parent  *SchemaBuilder
+	name    string
+	castAs  CastAs
+	indexes Indexes
+}
+
+// MatchOption configures optional parameters for a match (free-text search) index.
+type MatchOption func(*MatchIndexOpts)
+
+// WithK sets the number of hash functions for the bloom filter.
+func WithK(k int) MatchOption {
+	return func(o *MatchIndexOpts) { o.K = &k }
+}
+
+// WithM sets the size of the bloom filter in bits.
+func WithM(m int) MatchOption {
+	return func(o *MatchIndexOpts) { o.M = &m }
+}
+
+// WithTokenizer sets the tokenizer kind (e.g., "ngram", "standard").
+func WithTokenizer(kind string) MatchOption {
+	return func(o *MatchIndexOpts) {
+		if o.Tokenizer == nil {
+			o.Tokenizer = &Tokenizer{}
+		}
+		o.Tokenizer.Kind = kind
 	}
 }
 
-// BuildEncryptConfig creates an EncryptConfig from one or more table schema definitions.
-func BuildEncryptConfig(tables ...*TableDef) EncryptConfig {
-	tbls := make(Tables, len(tables))
-	for _, td := range tables {
-		tbl := make(Table, len(td.Columns))
-		for colName, col := range td.Columns {
-			tbl[colName] = col
+// WithTokenLength sets the token length for the ngram tokenizer.
+func WithTokenLength(n int) MatchOption {
+	return func(o *MatchIndexOpts) {
+		if o.Tokenizer == nil {
+			o.Tokenizer = &Tokenizer{}
 		}
-		tbls[td.Name] = tbl
-	}
-	return EncryptConfig{
-		Version: 1,
-		Tables:  tbls,
+		o.Tokenizer.TokenLength = &n
 	}
 }
+
+// WithIncludeOriginal controls whether the original value is included in the index.
+func WithIncludeOriginal(include bool) MatchOption {
+	return func(o *MatchIndexOpts) { o.IncludeOriginal = &include }
+}
+
+// NewSchema starts building a table schema with the given name.
+func NewSchema(tableName string) *SchemaBuilder {
+	return &SchemaBuilder{
+		name:    tableName,
+		columns: make(map[string]Column),
+	}
+}
+
+// Column begins configuring a new encrypted column.
+func (b *SchemaBuilder) Column(name string, castAs CastAs) *ColumnBuilder {
+	return &ColumnBuilder{
+		parent: b,
+		name:   name,
+		castAs: castAs,
+	}
+}
+
+// Equality adds a unique (HMAC) index to the column, with optional token filters.
+func (cb *ColumnBuilder) Equality(filters ...TokenFilter) *ColumnBuilder {
+	cb.indexes.UniqueIndex = &UniqueIndexOpts{TokenFilters: filters}
+	return cb
+}
+
+// FreeTextSearch adds a match (bloom filter) index to the column.
+func (cb *ColumnBuilder) FreeTextSearch(optFns ...MatchOption) *ColumnBuilder {
+	opts := defaultMatchOpts()
+	for _, fn := range optFns {
+		fn(opts)
+	}
+	cb.indexes.MatchIndex = opts
+	return cb
+}
+
+// OrderAndRange adds an ORE index to the column for range and ordering queries.
+func (cb *ColumnBuilder) OrderAndRange() *ColumnBuilder {
+	cb.indexes.OreIndex = &OreIndexOpts{}
+	return cb
+}
+
+// SearchableJSON adds an ste_vec index and sets the cast type to JSON.
+func (cb *ColumnBuilder) SearchableJSON(prefix string) *ColumnBuilder {
+	cb.castAs = CastAsJson
+	cb.indexes.SteVecIndex = &SteVecIndexOpts{Prefix: prefix}
+	return cb
+}
+
+// Done finalizes the column and returns the parent SchemaBuilder.
+func (cb *ColumnBuilder) Done() *SchemaBuilder {
+	ca := cb.castAs
+	col := Column{
+		CastAs:  &ca,
+		Indexes: &cb.indexes,
+	}
+	cb.parent.columns[cb.name] = col
+	return cb.parent
+}
+
+// Build creates the TableDef from the builder configuration.
+func (b *SchemaBuilder) Build() *TableDef {
+	return &TableDef{
+		name:    b.name,
+		columns: b.columns,
+	}
+}
+
+// defaultMatchOpts returns the default MatchIndexOpts matching the TypeScript SDK.
+func defaultMatchOpts() *MatchIndexOpts {
+	tokenLength := 3
+	k := 6
+	m := 2048
+	includeOriginal := true
+	return &MatchIndexOpts{
+		Tokenizer: &Tokenizer{
+			Kind:        "ngram",
+			TokenLength: &tokenLength,
+		},
+		TokenFilters:    []TokenFilter{{Kind: "downcase"}},
+		K:               &k,
+		M:               &m,
+		IncludeOriginal: &includeOriginal,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tag parsing (internal, unchanged logic)
+// ---------------------------------------------------------------------------
 
 // parseCSTag splits a cs struct tag value into the column name and remaining directives.
 // For example, "email,unique(downcase),match" returns ("email", ["unique(downcase)", "match"]).

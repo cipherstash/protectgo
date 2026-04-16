@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -8,7 +10,7 @@ import (
 	"github.com/cipherstash/protectgo/pkg/protect"
 )
 
-// Define your data model with encryption schema using struct tags.
+// User defines the data model with encryption schema using struct tags.
 //
 // The `cs` tag defines:
 //   - Column name (first value)
@@ -27,42 +29,49 @@ type User struct {
 }
 
 func main() {
+	ctx := context.Background()
+
 	// ---------------------------------------------------------------
-	// 1. Define schema from struct tags and create client
+	// 1. Define schema from struct tags
 	// ---------------------------------------------------------------
 
-	config := protect.BuildEncryptConfig(
-		protect.TableSchema("users", User{}),
+	users, err := protect.TableSchema("users", User{})
+	if err != nil {
+		log.Fatalf("Failed to create schema: %v", err)
+	}
+
+	// ---------------------------------------------------------------
+	// 2. Create client with functional options
+	// ---------------------------------------------------------------
+
+	client, err := protect.NewClient(ctx,
+		protect.WithSchemas(users),
+		protect.WithCredentials(
+			os.Getenv("CS_WORKSPACE_CRN"),
+			os.Getenv("CS_CLIENT_ACCESS_KEY"),
+			os.Getenv("CS_CLIENT_ID"),
+			os.Getenv("CS_CLIENT_KEY"),
+		),
 	)
-
-	client, err := protect.NewClient(protect.NewClientOptions{
-		EncryptConfig: config,
-		ClientOpts: &protect.ClientOpts{
-			WorkspaceCrn: ptr(os.Getenv("CS_WORKSPACE_CRN")),
-			AccessKey:    ptr(os.Getenv("CS_CLIENT_ACCESS_KEY")),
-			ClientID:     ptr(os.Getenv("CS_CLIENT_ID")),
-			ClientKey:    ptr(os.Getenv("CS_CLIENT_KEY")),
-		},
-	})
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
-	defer client.Free()
+	defer client.Close()
 
 	// ---------------------------------------------------------------
-	// 2. Encrypt and decrypt a model (struct-based)
+	// 3. Encrypt and decrypt a model (struct-based)
 	// ---------------------------------------------------------------
 
 	user := User{
-		ID:    1,
-		Email: "john.doe@example.com",
-		Name:  "John Doe",
-		Age:   30,
+		ID:     1,
+		Email:  "john.doe@example.com",
+		Name:   "John Doe",
+		Age:    30,
 		Active: true,
-		Role:  "admin",
+		Role:   "admin",
 	}
 
-	encryptedMap, err := client.EncryptModel(user, "users")
+	encryptedMap, err := client.EncryptModel(ctx, users, user)
 	if err != nil {
 		log.Fatalf("Failed to encrypt model: %v", err)
 	}
@@ -76,7 +85,7 @@ func main() {
 	fmt.Printf("  active:        [encrypted]\n")
 
 	var decryptedUser User
-	err = client.DecryptModel(encryptedMap, "users", &decryptedUser)
+	err = client.DecryptModel(ctx, users, encryptedMap, &decryptedUser)
 	if err != nil {
 		log.Fatalf("Failed to decrypt model: %v", err)
 	}
@@ -88,15 +97,15 @@ func main() {
 	fmt.Printf("  Role:  %s\n", decryptedUser.Role)
 
 	// ---------------------------------------------------------------
-	// 3. Bulk encrypt and decrypt models (single KMS call)
+	// 4. Bulk encrypt and decrypt models (single KMS call)
 	// ---------------------------------------------------------------
 
-	users := []User{
+	userSlice := []User{
 		{ID: 1, Email: "alice@example.com", Name: "Alice", Age: 28, Active: true, Role: "admin"},
 		{ID: 2, Email: "bob@example.com", Name: "Bob", Age: 35, Active: false, Role: "user"},
 	}
 
-	encryptedModels, err := client.BulkEncryptModels(users, "users")
+	encryptedModels, err := client.BulkEncryptModels(ctx, users, userSlice)
 	if err != nil {
 		log.Fatalf("Failed to bulk encrypt models: %v", err)
 	}
@@ -104,7 +113,7 @@ func main() {
 	fmt.Printf("\nBulk encrypted %d models\n", len(encryptedModels))
 
 	var decryptedUsers []User
-	err = client.BulkDecryptModels(encryptedModels, "users", &decryptedUsers)
+	err = client.BulkDecryptModels(ctx, users, encryptedModels, &decryptedUsers)
 	if err != nil {
 		log.Fatalf("Failed to bulk decrypt models: %v", err)
 	}
@@ -114,23 +123,17 @@ func main() {
 	}
 
 	// ---------------------------------------------------------------
-	// 4. Single value encryption and decryption
+	// 5. Single value encryption and decryption
 	// ---------------------------------------------------------------
 
-	encrypted, err := client.Encrypt(protect.EncryptOptions{
-		Plaintext: "john.doe@example.com",
-		Table:     "users",
-		Column:    "email",
-	})
+	encrypted, err := client.Encrypt(ctx, users.Column("email"), "john.doe@example.com")
 	if err != nil {
 		log.Fatalf("Failed to encrypt: %v", err)
 	}
 
 	fmt.Printf("\nEncrypted single value (has unique index: %v)\n", encrypted.UniqueIndex != nil)
 
-	plaintext, err := client.Decrypt(protect.DecryptOptions{
-		Ciphertext: encrypted,
-	})
+	plaintext, err := client.Decrypt(ctx, encrypted)
 	if err != nil {
 		log.Fatalf("Failed to decrypt: %v", err)
 	}
@@ -138,16 +141,11 @@ func main() {
 	fmt.Printf("Decrypted: %v\n", plaintext)
 
 	// ---------------------------------------------------------------
-	// 5. Query encryption (for searching encrypted columns)
+	// 6. Query encryption (for searching encrypted columns)
 	// ---------------------------------------------------------------
 
 	// Exact match query
-	queryResult, err := client.EncryptQuery(protect.EncryptQueryOptions{
-		Plaintext: "john.doe@example.com",
-		Column:    "email",
-		Table:     "users",
-		IndexType: protect.IndexTypeUnique,
-	})
+	queryResult, err := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "john.doe@example.com")
 	if err != nil {
 		log.Fatalf("Failed to encrypt query: %v", err)
 	}
@@ -155,12 +153,7 @@ func main() {
 	fmt.Printf("\nEncrypted equality query (unique index: %s)\n", *queryResult.UniqueIndex)
 
 	// Full-text search query
-	searchResult, err := client.EncryptQuery(protect.EncryptQueryOptions{
-		Plaintext: "john",
-		Column:    "name",
-		Table:     "users",
-		IndexType: protect.IndexTypeMatch,
-	})
+	searchResult, err := client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "john")
 	if err != nil {
 		log.Fatalf("Failed to encrypt search query: %v", err)
 	}
@@ -168,12 +161,7 @@ func main() {
 	fmt.Printf("Encrypted match query (bloom filter length: %d)\n", len(*searchResult.MatchIndex))
 
 	// Range query
-	rangeResult, err := client.EncryptQuery(protect.EncryptQueryOptions{
-		Plaintext: 25,
-		Column:    "age",
-		Table:     "users",
-		IndexType: protect.IndexTypeOre,
-	})
+	rangeResult, err := client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
 	if err != nil {
 		log.Fatalf("Failed to encrypt range query: %v", err)
 	}
@@ -181,11 +169,9 @@ func main() {
 	fmt.Printf("Encrypted range query (ORE index length: %d)\n", len(*rangeResult.OreIndex))
 
 	// Bulk query encryption
-	bulkQueries, err := client.EncryptQueryBulk(protect.EncryptQueryBulkOptions{
-		Queries: []protect.QueryPayload{
-			{Plaintext: "alice@example.com", Column: "email", Table: "users", IndexType: protect.IndexTypeUnique},
-			{Plaintext: "bob", Column: "name", Table: "users", IndexType: protect.IndexTypeMatch},
-		},
+	bulkQueries, err := client.EncryptQueryBulk(ctx, []protect.QueryItem{
+		{Column: users.Column("email"), QueryType: protect.Equality, Plaintext: "alice@example.com"},
+		{Column: users.Column("name"), QueryType: protect.FreeTextSearch, Plaintext: "bob"},
 	})
 	if err != nil {
 		log.Fatalf("Failed to bulk encrypt queries: %v", err)
@@ -194,27 +180,23 @@ func main() {
 	fmt.Printf("Bulk encrypted %d queries\n", len(bulkQueries))
 
 	// ---------------------------------------------------------------
-	// 6. Bulk encrypt and decrypt individual values
+	// 7. Bulk encrypt and decrypt individual values
 	// ---------------------------------------------------------------
 
-	bulkEncrypted, err := client.EncryptBulk(protect.EncryptBulkOptions{
-		Plaintexts: []protect.PlaintextPayload{
-			{Plaintext: "alice@example.com", Table: "users", Column: "email"},
-			{Plaintext: "bob@example.com", Table: "users", Column: "email"},
-		},
+	bulkEncrypted, err := client.EncryptBulk(ctx, []protect.PlaintextItem{
+		{Column: users.Column("email"), Plaintext: "alice@example.com"},
+		{Column: users.Column("email"), Plaintext: "bob@example.com"},
 	})
 	if err != nil {
 		log.Fatalf("Failed to bulk encrypt: %v", err)
 	}
 
-	ciphertexts := make([]protect.BulkDecryptPayload, len(bulkEncrypted))
+	decryptItems := make([]*protect.Encrypted, len(bulkEncrypted))
 	for i := range bulkEncrypted {
-		ciphertexts[i] = protect.BulkDecryptPayload{Ciphertext: &bulkEncrypted[i]}
+		decryptItems[i] = &bulkEncrypted[i]
 	}
 
-	bulkPlaintexts, err := client.DecryptBulk(protect.DecryptBulkOptions{
-		Ciphertexts: ciphertexts,
-	})
+	bulkPlaintexts, err := client.DecryptBulk(ctx, decryptItems)
 	if err != nil {
 		log.Fatalf("Failed to bulk decrypt: %v", err)
 	}
@@ -222,53 +204,47 @@ func main() {
 	fmt.Printf("\nBulk decrypted: %v\n", bulkPlaintexts)
 
 	// ---------------------------------------------------------------
-	// 7. Fallible bulk decryption (per-item error handling)
+	// 8. Fallible bulk decryption (per-item error handling)
 	// ---------------------------------------------------------------
 
-	fallibleResults, err := client.DecryptBulkFallible(protect.DecryptBulkOptions{
-		Ciphertexts: ciphertexts,
-	})
+	fallibleResults, err := client.DecryptBulkFallible(ctx, decryptItems)
 	if err != nil {
 		log.Fatalf("Failed to bulk decrypt fallible: %v", err)
 	}
 
 	for i, result := range fallibleResults {
-		if result.Error != nil {
-			fmt.Printf("  Result %d: error - %s\n", i, *result.Error)
+		if result.Err != nil {
+			fmt.Printf("  Result %d: error - %s\n", i, result.Err)
 		} else {
 			fmt.Printf("  Result %d: %v\n", i, result.Data)
 		}
 	}
 
 	// ---------------------------------------------------------------
-	// 8. IsEncrypted validation
+	// 9. IsEncrypted validation
 	// ---------------------------------------------------------------
 
 	fmt.Printf("\nIsEncrypted(encrypted value): %v\n", protect.IsEncrypted(encrypted))
 	fmt.Printf("IsEncrypted(plain string):    %v\n", protect.IsEncrypted("not encrypted"))
 
 	// ---------------------------------------------------------------
-	// 9. Identity-aware encryption (lock context)
+	// 10. Identity-aware encryption (lock context)
 	// ---------------------------------------------------------------
 
 	lockContext := &protect.LockContext{
 		IdentityClaim: []string{"user:12345"},
 	}
 
-	lockedEncrypted, err := client.Encrypt(protect.EncryptOptions{
-		Plaintext:   "secret-data",
-		Table:       "users",
-		Column:      "email",
-		LockContext: lockContext,
-	})
+	lockedEncrypted, err := client.Encrypt(ctx, users.Column("email"), "secret-data",
+		protect.WithLockContext(lockContext),
+	)
 	if err != nil {
 		log.Fatalf("Failed to encrypt with lock context: %v", err)
 	}
 
-	lockedPlaintext, err := client.Decrypt(protect.DecryptOptions{
-		Ciphertext:  lockedEncrypted,
-		LockContext: lockContext,
-	})
+	lockedPlaintext, err := client.Decrypt(ctx, lockedEncrypted,
+		protect.WithLockContext(lockContext),
+	)
 	if err != nil {
 		log.Fatalf("Failed to decrypt with lock context: %v", err)
 	}
@@ -276,23 +252,15 @@ func main() {
 	fmt.Printf("Identity-aware decrypt: %v\n", lockedPlaintext)
 
 	// ---------------------------------------------------------------
-	// 10. Structured error handling
+	// 11. Error handling with errors.Is
 	// ---------------------------------------------------------------
 
-	_, err = client.Encrypt(protect.EncryptOptions{
-		Plaintext: "test",
-		Table:     "users",
-		Column:    "nonexistent",
-	})
+	_, err = client.Encrypt(ctx, users.Column("email"), "test")
 	if err != nil {
-		if encErr, ok := err.(*protect.EncryptionError); ok {
-			fmt.Printf("\nStructured error:\n")
-			fmt.Printf("  Code:    %s\n", encErr.Code)
-			fmt.Printf("  Message: %s\n", encErr.Message)
+		if errors.Is(err, protect.ErrUnknownColumn) {
+			fmt.Println("Column not found in schema")
+		} else {
+			fmt.Printf("Error: %v\n", err)
 		}
 	}
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }

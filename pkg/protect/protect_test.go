@@ -6,22 +6,27 @@ import (
 	"testing"
 )
 
-// TestIdentifier tests the Identifier creation and JSON marshaling
+// ---------------------------------------------------------------------------
+// Identifier tests
+// ---------------------------------------------------------------------------
+
 func TestIdentifier(t *testing.T) {
-	ident := NewIdentifier("users", "email")
+	t.Parallel()
+
+	ident := Identifier{Table: "users", Column: "email"}
 
 	if ident.Table != "users" {
-		t.Errorf("Expected table 'users', got '%s'", ident.Table)
+		t.Errorf("Expected table 'users', got %q", ident.Table)
 	}
-
 	if ident.Column != "email" {
-		t.Errorf("Expected column 'email', got '%s'", ident.Column)
+		t.Errorf("Expected column 'email', got %q", ident.Column)
 	}
 }
 
-// TestIdentifierJSON tests JSON serialization of Identifier
 func TestIdentifierJSON(t *testing.T) {
-	ident := NewIdentifier("users", "email")
+	t.Parallel()
+
+	ident := Identifier{Table: "users", Column: "email"}
 
 	data, err := json.Marshal(ident)
 	if err != nil {
@@ -38,65 +43,13 @@ func TestIdentifierJSON(t *testing.T) {
 	}
 }
 
-// TestEncryptConfigStructure tests the configuration structure
-func TestEncryptConfigStructure(t *testing.T) {
-	castAs := CastAsText
-	config := EncryptConfig{
-		Version: 1,
-		Tables: Tables{
-			"users": Table{
-				"email": Column{
-					CastAs: &castAs,
-					Indexes: &Indexes{
-						OreIndex: &OreIndexOpts{},
-						UniqueIndex: &UniqueIndexOpts{
-							TokenFilters: []TokenFilter{
-								{Kind: "downcase"},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
+// ---------------------------------------------------------------------------
+// CastAs tests
+// ---------------------------------------------------------------------------
 
-	if config.Version != 1 {
-		t.Errorf("Expected version 1, got %d", config.Version)
-	}
-
-	usersTable, exists := config.Tables["users"]
-	if !exists {
-		t.Fatal("Expected 'users' table to exist")
-	}
-
-	emailColumn, exists := usersTable["email"]
-	if !exists {
-		t.Fatal("Expected 'email' column to exist")
-	}
-
-	if *emailColumn.CastAs != CastAsText {
-		t.Errorf("Expected CastAsText, got %v", *emailColumn.CastAs)
-	}
-
-	if emailColumn.Indexes.OreIndex == nil {
-		t.Error("Expected OreIndex to be configured")
-	}
-
-	if emailColumn.Indexes.UniqueIndex == nil {
-		t.Error("Expected UniqueIndex to be configured")
-	}
-
-	if len(emailColumn.Indexes.UniqueIndex.TokenFilters) != 1 {
-		t.Errorf("Expected 1 token filter, got %d", len(emailColumn.Indexes.UniqueIndex.TokenFilters))
-	}
-
-	if emailColumn.Indexes.UniqueIndex.TokenFilters[0].Kind != "downcase" {
-		t.Errorf("Expected 'downcase' token filter, got '%s'", emailColumn.Indexes.UniqueIndex.TokenFilters[0].Kind)
-	}
-}
-
-// TestCastAsConstants tests the CastAs constants
 func TestCastAsConstants(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		constant CastAs
@@ -112,7 +65,9 @@ func TestCastAsConstants(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if string(tc.constant) != tc.expected {
 				t.Errorf("Expected %s, got %s", tc.expected, string(tc.constant))
 			}
@@ -120,467 +75,307 @@ func TestCastAsConstants(t *testing.T) {
 	}
 }
 
-// TestEncryptOptions tests the encrypt options structure
-func TestEncryptOptions(t *testing.T) {
-	lockContext := &LockContext{
-		IdentityClaim: []string{"user:123"},
-	}
+// ---------------------------------------------------------------------------
+// QueryType tests
+// ---------------------------------------------------------------------------
 
-	opts := EncryptOptions{
-		Plaintext:   "test@example.com",
-		Column:      "email",
-		Table:       "users",
-		LockContext: lockContext,
-	}
+func TestQueryTypeConstants(t *testing.T) {
+	t.Parallel()
 
-	if opts.Plaintext != "test@example.com" {
-		t.Errorf("Expected plaintext 'test@example.com', got '%v'", opts.Plaintext)
-	}
-
-	if opts.Column != "email" {
-		t.Errorf("Expected column 'email', got '%s'", opts.Column)
-	}
-
-	if opts.Table != "users" {
-		t.Errorf("Expected table 'users', got '%s'", opts.Table)
-	}
-
-	if opts.LockContext == nil {
-		t.Fatal("Expected LockContext to be set")
-	}
-
-	if len(opts.LockContext.IdentityClaim) != 1 {
-		t.Errorf("Expected 1 identity claim, got %d", len(opts.LockContext.IdentityClaim))
-	}
-
-	if opts.LockContext.IdentityClaim[0] != "user:123" {
-		t.Errorf("Expected 'user:123', got '%s'", opts.LockContext.IdentityClaim[0])
-	}
-}
-
-// TestEncryptOptionsMultiType tests that EncryptOptions accepts multiple plaintext types
-func TestEncryptOptionsMultiType(t *testing.T) {
 	tests := []struct {
-		name      string
-		plaintext interface{}
+		name     string
+		constant QueryType
+		expected string
 	}{
-		{"string", "hello world"},
-		{"number_int", 42},
-		{"number_float", 3.14},
-		{"boolean_true", true},
-		{"boolean_false", false},
-		{"json_object", map[string]interface{}{"key": "value"}},
-		{"json_array", []interface{}{"a", "b", "c"}},
-		{"nil", nil},
+		{"Equality", Equality, "unique"},
+		{"FreeTextSearch", FreeTextSearch, "match"},
+		{"OrderAndRange", OrderAndRange, "ore"},
+		{"JSONSelector", JSONSelector, "ste_vec_selector"},
+		{"JSONContains", JSONContains, "ste_vec_term"},
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			opts := EncryptOptions{
-				Plaintext: tc.plaintext,
-				Column:    "data",
-				Table:     "test",
-			}
-
-			data, err := json.Marshal(opts)
-			if err != nil {
-				t.Fatalf("Failed to marshal EncryptOptions with %s plaintext: %v", tc.name, err)
-			}
-
-			var decoded map[string]interface{}
-			if err := json.Unmarshal(data, &decoded); err != nil {
-				t.Fatalf("Failed to unmarshal EncryptOptions: %v", err)
-			}
-
-			if _, exists := decoded["plaintext"]; !exists && tc.plaintext != nil {
-				t.Error("Expected plaintext field in JSON output")
+			t.Parallel()
+			if string(tc.constant) != tc.expected {
+				t.Errorf("Expected %s, got %s", tc.expected, string(tc.constant))
 			}
 		})
 	}
 }
 
-// TestBulkEncryptOptions tests the bulk encrypt options structure
-func TestBulkEncryptOptions(t *testing.T) {
-	opts := EncryptBulkOptions{
-		Plaintexts: []PlaintextPayload{
-			{
-				Plaintext: "alice@example.com",
-				Column:    "email",
-				Table:     "users",
-			},
-			{
-				Plaintext: 42,
-				Column:    "age",
-				Table:     "users",
-			},
+// ---------------------------------------------------------------------------
+// resolveQueryType tests
+// ---------------------------------------------------------------------------
+
+func TestResolveQueryType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		queryType     QueryType
+		wantIndexType string
+		wantQueryOp   string
+	}{
+		{"Equality", Equality, "unique", "default"},
+		{"FreeTextSearch", FreeTextSearch, "match", "default"},
+		{"OrderAndRange", OrderAndRange, "ore", "default"},
+		{"JSONSelector", JSONSelector, "ste_vec", "ste_vec_selector"},
+		{"JSONContains", JSONContains, "ste_vec", "ste_vec_term"},
+		{"Unknown", QueryType("custom"), "custom", "default"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			indexType, queryOp := resolveQueryType(tc.queryType)
+			if indexType != tc.wantIndexType {
+				t.Errorf("indexType: got %q, want %q", indexType, tc.wantIndexType)
+			}
+			if queryOp != tc.wantQueryOp {
+				t.Errorf("queryOp: got %q, want %q", queryOp, tc.wantQueryOp)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ColumnRef tests
+// ---------------------------------------------------------------------------
+
+func TestColumnRefFromTableDef(t *testing.T) {
+	t.Parallel()
+
+	td := &TableDef{
+		name: "users",
+		columns: map[string]Column{
+			"email": {CastAs: castPtr(CastAsString)},
+			"age":   {CastAs: castPtr(CastAsNumber)},
 		},
 	}
 
-	if len(opts.Plaintexts) != 2 {
-		t.Errorf("Expected 2 plaintexts, got %d", len(opts.Plaintexts))
+	col := td.Column("email")
+	if col.table != "users" {
+		t.Errorf("table: got %q, want %q", col.table, "users")
 	}
-
-	if opts.Plaintexts[0].Plaintext != "alice@example.com" {
-		t.Errorf("Expected 'alice@example.com', got '%v'", opts.Plaintexts[0].Plaintext)
-	}
-
-	if opts.Plaintexts[1].Plaintext != 42 {
-		t.Errorf("Expected 42, got '%v'", opts.Plaintexts[1].Plaintext)
+	if col.column != "email" {
+		t.Errorf("column: got %q, want %q", col.column, "email")
 	}
 }
 
-// TestDecryptOptions tests the decrypt options structure with Encrypted ciphertext
-func TestDecryptOptions(t *testing.T) {
-	ct := "encrypted-data"
-	encrypted := &Encrypted{
-		Identifier: NewIdentifier("users", "email"),
-		Version:    1,
-		Ciphertext: &ct,
+func TestColumnRefPanicsOnUnknownColumn(t *testing.T) {
+	t.Parallel()
+
+	td := &TableDef{
+		name: "users",
+		columns: map[string]Column{
+			"email": {CastAs: castPtr(CastAsString)},
+		},
 	}
 
-	opts := DecryptOptions{
-		Ciphertext: encrypted,
-	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for unknown column")
+		}
+	}()
+	td.Column("nonexistent")
+}
 
-	if opts.Ciphertext == nil {
-		t.Fatal("Expected Ciphertext to be set")
-	}
+// ---------------------------------------------------------------------------
+// ClientOption tests
+// ---------------------------------------------------------------------------
 
-	if opts.Ciphertext.Version != 1 {
-		t.Errorf("Expected version 1, got %d", opts.Ciphertext.Version)
-	}
+func TestWithSchemas(t *testing.T) {
+	t.Parallel()
 
-	if *opts.Ciphertext.Ciphertext != "encrypted-data" {
-		t.Errorf("Expected 'encrypted-data', got '%s'", *opts.Ciphertext.Ciphertext)
+	td1 := &TableDef{name: "users", columns: map[string]Column{}}
+	td2 := &TableDef{name: "orders", columns: map[string]Column{}}
+
+	cfg := &clientConfig{}
+	WithSchemas(td1, td2)(cfg)
+
+	if len(cfg.schemas) != 2 {
+		t.Fatalf("schemas count: got %d, want 2", len(cfg.schemas))
+	}
+	if cfg.schemas[0].name != "users" {
+		t.Errorf("schema[0]: got %q, want %q", cfg.schemas[0].name, "users")
+	}
+	if cfg.schemas[1].name != "orders" {
+		t.Errorf("schema[1]: got %q, want %q", cfg.schemas[1].name, "orders")
 	}
 }
 
-// TestDecryptOptionsJSON tests JSON serialization of DecryptOptions
-func TestDecryptOptionsJSON(t *testing.T) {
-	ct := "encrypted-data"
-	encrypted := &Encrypted{
-		Identifier: NewIdentifier("users", "email"),
-		Version:    1,
-		Ciphertext: &ct,
-	}
+func TestWithCredentials(t *testing.T) {
+	t.Parallel()
 
-	opts := DecryptOptions{
-		Ciphertext: encrypted,
-	}
+	cfg := &clientConfig{}
+	WithCredentials("crn", "key", "id", "secret")(cfg)
 
-	data, err := json.Marshal(opts)
-	if err != nil {
-		t.Fatalf("Failed to marshal DecryptOptions: %v", err)
+	if cfg.workspaceCRN != "crn" {
+		t.Errorf("workspaceCRN: got %q, want %q", cfg.workspaceCRN, "crn")
 	}
-
-	var decoded map[string]interface{}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("Failed to unmarshal DecryptOptions: %v", err)
+	if cfg.accessKey != "key" {
+		t.Errorf("accessKey: got %q, want %q", cfg.accessKey, "key")
 	}
+	if cfg.clientID != "id" {
+		t.Errorf("clientID: got %q, want %q", cfg.clientID, "id")
+	}
+	if cfg.clientKey != "secret" {
+		t.Errorf("clientKey: got %q, want %q", cfg.clientKey, "secret")
+	}
+}
 
-	ciphertext, ok := decoded["ciphertext"].(map[string]interface{})
+func TestWithKeyset(t *testing.T) {
+	t.Parallel()
+
+	cfg := &clientConfig{}
+	WithKeyset("tenant-a")(cfg)
+
+	if cfg.keysetName != "tenant-a" {
+		t.Errorf("keysetName: got %q, want %q", cfg.keysetName, "tenant-a")
+	}
+}
+
+func TestWithKeysetID(t *testing.T) {
+	t.Parallel()
+
+	cfg := &clientConfig{}
+	WithKeysetID("ks-123")(cfg)
+
+	if cfg.keysetID != "ks-123" {
+		t.Errorf("keysetID: got %q, want %q", cfg.keysetID, "ks-123")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Operation Option tests
+// ---------------------------------------------------------------------------
+
+func TestWithLockContext(t *testing.T) {
+	t.Parallel()
+
+	lc := &LockContext{IdentityClaim: []string{"user:123"}}
+	co := buildCallOpts([]Option{WithLockContext(lc)})
+
+	if co.lockContext == nil {
+		t.Fatal("lockContext: expected non-nil")
+	}
+	if len(co.lockContext.IdentityClaim) != 1 || co.lockContext.IdentityClaim[0] != "user:123" {
+		t.Errorf("lockContext.IdentityClaim: got %v, want [user:123]", co.lockContext.IdentityClaim)
+	}
+}
+
+func TestWithServiceToken(t *testing.T) {
+	t.Parallel()
+
+	co := buildCallOpts([]Option{WithServiceToken("tok-abc")})
+
+	if co.serviceToken == nil || *co.serviceToken != "tok-abc" {
+		t.Errorf("serviceToken: got %v, want %q", co.serviceToken, "tok-abc")
+	}
+}
+
+func TestWithAuditContext(t *testing.T) {
+	t.Parallel()
+
+	audit := map[string]string{"action": "test"}
+	co := buildCallOpts([]Option{WithAuditContext(audit)})
+
+	if co.unverifiedContext == nil {
+		t.Fatal("unverifiedContext: expected non-nil")
+	}
+	m, ok := co.unverifiedContext.(map[string]string)
 	if !ok {
-		t.Fatal("Expected ciphertext to be an object")
+		t.Fatalf("unverifiedContext: expected map[string]string, got %T", co.unverifiedContext)
 	}
-
-	if ciphertext["c"] != "encrypted-data" {
-		t.Errorf("Expected ciphertext.c to be 'encrypted-data', got '%v'", ciphertext["c"])
-	}
-}
-
-// TestBulkDecryptPayload tests the bulk decrypt payload with Encrypted ciphertext
-func TestBulkDecryptPayload(t *testing.T) {
-	ct := "encrypted-data"
-	encrypted := &Encrypted{
-		Identifier: NewIdentifier("users", "email"),
-		Version:    1,
-		Ciphertext: &ct,
-	}
-
-	payload := BulkDecryptPayload{
-		Ciphertext: encrypted,
-	}
-
-	if payload.Ciphertext == nil {
-		t.Fatal("Expected Ciphertext to be set")
-	}
-
-	if *payload.Ciphertext.Ciphertext != "encrypted-data" {
-		t.Errorf("Expected 'encrypted-data', got '%s'", *payload.Ciphertext.Ciphertext)
+	if m["action"] != "test" {
+		t.Errorf("unverifiedContext[action]: got %q, want %q", m["action"], "test")
 	}
 }
 
-// TestDecryptResult tests the decrypt result structure with interface{} data
-func TestDecryptResult(t *testing.T) {
-	t.Run("string data", func(t *testing.T) {
-		result := DecryptResult{
-			Data: "decrypted data",
-		}
+func TestBuildCallOptsEmpty(t *testing.T) {
+	t.Parallel()
 
-		if result.Data == nil {
-			t.Error("Expected data to be set")
-		}
+	co := buildCallOpts(nil)
 
-		if result.Data != "decrypted data" {
-			t.Errorf("Expected 'decrypted data', got '%v'", result.Data)
-		}
-
-		if result.Error != nil {
-			t.Error("Expected error to be nil for successful result")
-		}
-	})
-
-	t.Run("numeric data", func(t *testing.T) {
-		result := DecryptResult{
-			Data: 42.0,
-		}
-
-		if result.Data != 42.0 {
-			t.Errorf("Expected 42.0, got '%v'", result.Data)
-		}
-	})
-
-	t.Run("boolean data", func(t *testing.T) {
-		result := DecryptResult{
-			Data: true,
-		}
-
-		if result.Data != true {
-			t.Errorf("Expected true, got '%v'", result.Data)
-		}
-	})
-
-	t.Run("nil data", func(t *testing.T) {
-		result := DecryptResult{
-			Data: nil,
-		}
-
-		if result.Data != nil {
-			t.Error("Expected data to be nil")
-		}
-	})
-
-	t.Run("error result", func(t *testing.T) {
-		errorMsg := "decryption failed"
-		result := DecryptResult{
-			Error: &errorMsg,
-		}
-
-		if result.Error == nil {
-			t.Error("Expected error to be set")
-		}
-
-		if *result.Error != "decryption failed" {
-			t.Errorf("Expected 'decryption failed', got '%s'", *result.Error)
-		}
-
-		if result.Data != nil {
-			t.Error("Expected data to be nil for error result")
-		}
-	})
-}
-
-// TestDecryptResultJSON tests JSON round-trip of DecryptResult with multi-type data
-func TestDecryptResultJSON(t *testing.T) {
-	tests := []struct {
-		name string
-		json string
-	}{
-		{"string", `{"data":"hello"}`},
-		{"number", `{"data":42}`},
-		{"boolean", `{"data":true}`},
-		{"null", `{"data":null}`},
-		{"error", `{"error":"failed"}`},
+	if co.lockContext != nil {
+		t.Error("lockContext: expected nil")
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var result DecryptResult
-			if err := json.Unmarshal([]byte(tc.json), &result); err != nil {
-				t.Fatalf("Failed to unmarshal: %v", err)
-			}
-		})
+	if co.serviceToken != nil {
+		t.Error("serviceToken: expected nil")
+	}
+	if co.unverifiedContext != nil {
+		t.Error("unverifiedContext: expected nil")
 	}
 }
 
-// TestTokenizer tests the tokenizer structure
-func TestTokenizer(t *testing.T) {
-	// Test standard tokenizer
-	standardTokenizer := Tokenizer{
-		Kind: "standard",
-	}
+// ---------------------------------------------------------------------------
+// EncryptConfig building tests
+// ---------------------------------------------------------------------------
 
-	if standardTokenizer.Kind != "standard" {
-		t.Errorf("Expected 'standard', got '%s'", standardTokenizer.Kind)
-	}
+func TestBuildEncryptConfigFromSchemas(t *testing.T) {
+	t.Parallel()
 
-	if standardTokenizer.TokenLength != nil {
-		t.Error("Expected TokenLength to be nil for standard tokenizer")
-	}
-
-	// Test ngram tokenizer
-	tokenLength := 3
-	ngramTokenizer := Tokenizer{
-		Kind:        "ngram",
-		TokenLength: &tokenLength,
-	}
-
-	if ngramTokenizer.Kind != "ngram" {
-		t.Errorf("Expected 'ngram', got '%s'", ngramTokenizer.Kind)
-	}
-
-	if ngramTokenizer.TokenLength == nil {
-		t.Error("Expected TokenLength to be set for ngram tokenizer")
-	}
-
-	if *ngramTokenizer.TokenLength != 3 {
-		t.Errorf("Expected token length 3, got %d", *ngramTokenizer.TokenLength)
-	}
-}
-
-// TestMatchIndexOpts tests the match index options
-func TestMatchIndexOpts(t *testing.T) {
-	k := 8
-	m := 1024
-	includeOriginal := true
-
-	matchOpts := MatchIndexOpts{
-		Tokenizer: &Tokenizer{
-			Kind: "standard",
+	td := &TableDef{
+		name: "users",
+		columns: map[string]Column{
+			"email": {CastAs: castPtr(CastAsString)},
+			"age":   {CastAs: castPtr(CastAsNumber)},
 		},
-		TokenFilters: []TokenFilter{
-			{Kind: "downcase"},
-			{Kind: "trim"},
-		},
-		K:               &k,
-		M:               &m,
-		IncludeOriginal: &includeOriginal,
 	}
 
-	if matchOpts.Tokenizer == nil {
-		t.Error("Expected tokenizer to be set")
-	}
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
 
-	if matchOpts.Tokenizer.Kind != "standard" {
-		t.Errorf("Expected 'standard' tokenizer, got '%s'", matchOpts.Tokenizer.Kind)
+	if config.Version != 1 {
+		t.Errorf("version: got %d, want 1", config.Version)
 	}
-
-	if len(matchOpts.TokenFilters) != 2 {
-		t.Errorf("Expected 2 token filters, got %d", len(matchOpts.TokenFilters))
+	if len(config.Tables) != 1 {
+		t.Fatalf("tables: got %d, want 1", len(config.Tables))
 	}
-
-	if matchOpts.TokenFilters[0].Kind != "downcase" {
-		t.Errorf("Expected 'downcase', got '%s'", matchOpts.TokenFilters[0].Kind)
+	usersTable, ok := config.Tables["users"]
+	if !ok {
+		t.Fatal("missing users table")
 	}
-
-	if matchOpts.TokenFilters[1].Kind != "trim" {
-		t.Errorf("Expected 'trim', got '%s'", matchOpts.TokenFilters[1].Kind)
-	}
-
-	if matchOpts.K == nil || *matchOpts.K != 8 {
-		t.Errorf("Expected K to be 8, got %v", matchOpts.K)
-	}
-
-	if matchOpts.M == nil || *matchOpts.M != 1024 {
-		t.Errorf("Expected M to be 1024, got %v", matchOpts.M)
-	}
-
-	if matchOpts.IncludeOriginal == nil || *matchOpts.IncludeOriginal != true {
-		t.Errorf("Expected IncludeOriginal to be true, got %v", matchOpts.IncludeOriginal)
+	if len(usersTable) != 2 {
+		t.Errorf("user columns: got %d, want 2", len(usersTable))
 	}
 }
 
-// TestSteVecIndexOpts tests the SteVec index options with new fields
-func TestSteVecIndexOpts(t *testing.T) {
-	t.Run("basic", func(t *testing.T) {
-		opts := SteVecIndexOpts{
-			Prefix: "users",
-		}
+func TestBuildEncryptConfigFromSchemasMultiple(t *testing.T) {
+	t.Parallel()
 
-		if opts.Prefix != "users" {
-			t.Errorf("Expected prefix 'users', got '%s'", opts.Prefix)
-		}
+	td1 := &TableDef{name: "users", columns: map[string]Column{"email": {}}}
+	td2 := &TableDef{name: "orders", columns: map[string]Column{"total": {}}}
 
-		if opts.TermFilters != nil {
-			t.Error("Expected TermFilters to be nil")
-		}
+	config := buildEncryptConfigFromSchemas([]*TableDef{td1, td2})
 
-		if opts.ArrayIndexMode != nil {
-			t.Error("Expected ArrayIndexMode to be nil")
-		}
-	})
-
-	t.Run("with term filters and array index mode", func(t *testing.T) {
-		arrayMode := "flatten"
-		opts := SteVecIndexOpts{
-			Prefix: "products",
-			TermFilters: []TokenFilter{
-				{Kind: "downcase"},
-				{Kind: "trim"},
-			},
-			ArrayIndexMode: &arrayMode,
-		}
-
-		if opts.Prefix != "products" {
-			t.Errorf("Expected prefix 'products', got '%s'", opts.Prefix)
-		}
-
-		if len(opts.TermFilters) != 2 {
-			t.Errorf("Expected 2 term filters, got %d", len(opts.TermFilters))
-		}
-
-		if opts.TermFilters[0].Kind != "downcase" {
-			t.Errorf("Expected 'downcase', got '%s'", opts.TermFilters[0].Kind)
-		}
-
-		if opts.ArrayIndexMode == nil || *opts.ArrayIndexMode != "flatten" {
-			t.Errorf("Expected ArrayIndexMode 'flatten', got %v", opts.ArrayIndexMode)
-		}
-	})
-
-	t.Run("json round-trip", func(t *testing.T) {
-		arrayMode := "flatten"
-		opts := SteVecIndexOpts{
-			Prefix: "test",
-			TermFilters: []TokenFilter{
-				{Kind: "downcase"},
-			},
-			ArrayIndexMode: &arrayMode,
-		}
-
-		data, err := json.Marshal(opts)
-		if err != nil {
-			t.Fatalf("Failed to marshal: %v", err)
-		}
-
-		var decoded SteVecIndexOpts
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("Failed to unmarshal: %v", err)
-		}
-
-		if decoded.Prefix != "test" {
-			t.Errorf("Expected prefix 'test', got '%s'", decoded.Prefix)
-		}
-
-		if len(decoded.TermFilters) != 1 {
-			t.Errorf("Expected 1 term filter, got %d", len(decoded.TermFilters))
-		}
-
-		if decoded.ArrayIndexMode == nil || *decoded.ArrayIndexMode != "flatten" {
-			t.Errorf("Expected ArrayIndexMode 'flatten', got %v", decoded.ArrayIndexMode)
-		}
-	})
+	if len(config.Tables) != 2 {
+		t.Fatalf("tables: got %d, want 2", len(config.Tables))
+	}
+	if _, ok := config.Tables["users"]; !ok {
+		t.Error("missing users table")
+	}
+	if _, ok := config.Tables["orders"]; !ok {
+		t.Error("missing orders table")
+	}
 }
 
-// TestEncryptedStruct tests the Encrypted struct without Kind field
+// ---------------------------------------------------------------------------
+// Encrypted struct tests
+// ---------------------------------------------------------------------------
+
 func TestEncryptedStruct(t *testing.T) {
+	t.Parallel()
+
 	ct := "ciphertext-value"
 	ore := []string{"ore1", "ore2"}
 	match := []uint16{1, 2, 3}
 	unique := "unique-hash"
 
 	encrypted := Encrypted{
-		Identifier:  NewIdentifier("users", "email"),
+		Identifier:  Identifier{Table: "users", Column: "email"},
 		Version:     1,
 		Ciphertext:  &ct,
 		OreIndex:    &ore,
@@ -589,23 +384,22 @@ func TestEncryptedStruct(t *testing.T) {
 	}
 
 	if encrypted.Identifier.Table != "users" {
-		t.Errorf("Expected table 'users', got '%s'", encrypted.Identifier.Table)
+		t.Errorf("Expected table 'users', got %q", encrypted.Identifier.Table)
 	}
-
 	if encrypted.Version != 1 {
 		t.Errorf("Expected version 1, got %d", encrypted.Version)
 	}
-
 	if *encrypted.Ciphertext != "ciphertext-value" {
-		t.Errorf("Expected 'ciphertext-value', got '%s'", *encrypted.Ciphertext)
+		t.Errorf("Expected 'ciphertext-value', got %q", *encrypted.Ciphertext)
 	}
 }
 
-// TestEncryptedJSON tests JSON serialization of Encrypted (no Kind field)
 func TestEncryptedJSON(t *testing.T) {
+	t.Parallel()
+
 	ct := "ciphertext-value"
 	encrypted := Encrypted{
-		Identifier: NewIdentifier("users", "email"),
+		Identifier: Identifier{Table: "users", Column: "email"},
 		Version:    1,
 		Ciphertext: &ct,
 	}
@@ -615,298 +409,112 @@ func TestEncryptedJSON(t *testing.T) {
 		t.Fatalf("Failed to marshal: %v", err)
 	}
 
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Failed to unmarshal: %v", err)
 	}
 
-	// Verify Kind field is not present
-	if _, exists := decoded["k"]; exists {
-		t.Error("Expected 'k' (Kind) field to not be present in JSON output")
-	}
-
-	// Verify expected fields
 	if decoded["c"] != "ciphertext-value" {
-		t.Errorf("Expected c='ciphertext-value', got '%v'", decoded["c"])
+		t.Errorf("Expected c='ciphertext-value', got %v", decoded["c"])
 	}
-
-	// Version should be present
 	if decoded["v"] == nil {
 		t.Error("Expected 'v' field to be present")
 	}
 }
 
-// TestKeysetConfig tests the KeysetConfig structure
-func TestKeysetConfig(t *testing.T) {
-	t.Run("with name", func(t *testing.T) {
-		name := "my-keyset"
-		config := KeysetConfig{
-			Name: &name,
-		}
+func TestEncryptedJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 
-		if config.Name == nil || *config.Name != "my-keyset" {
-			t.Errorf("Expected name 'my-keyset', got %v", config.Name)
-		}
+	ct := "cipher"
+	ore := []string{"a", "b"}
+	unique := "hmac"
 
-		if config.ID != nil {
-			t.Error("Expected ID to be nil")
-		}
-	})
-
-	t.Run("with id", func(t *testing.T) {
-		id := "keyset-123"
-		config := KeysetConfig{
-			ID: &id,
-		}
-
-		if config.ID == nil || *config.ID != "keyset-123" {
-			t.Errorf("Expected id 'keyset-123', got %v", config.ID)
-		}
-
-		if config.Name != nil {
-			t.Error("Expected Name to be nil")
-		}
-	})
-
-	t.Run("json omitempty", func(t *testing.T) {
-		name := "test"
-		config := KeysetConfig{
-			Name: &name,
-		}
-
-		data, err := json.Marshal(config)
-		if err != nil {
-			t.Fatalf("Failed to marshal: %v", err)
-		}
-
-		var decoded map[string]interface{}
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("Failed to unmarshal: %v", err)
-		}
-
-		if _, exists := decoded["id"]; exists {
-			t.Error("Expected 'id' to be omitted when nil")
-		}
-	})
-}
-
-// TestClientOptsWithKeyset tests ClientOpts includes Keyset field
-func TestClientOptsWithKeyset(t *testing.T) {
-	keysetName := "my-keyset"
-	opts := ClientOpts{
-		Keyset: &KeysetConfig{
-			Name: &keysetName,
-		},
+	original := Encrypted{
+		Identifier:  Identifier{Table: "t", Column: "c"},
+		Version:     1,
+		Ciphertext:  &ct,
+		OreIndex:    &ore,
+		UniqueIndex: &unique,
 	}
 
-	data, err := json.Marshal(opts)
+	data, err := json.Marshal(original)
 	if err != nil {
-		t.Fatalf("Failed to marshal: %v", err)
+		t.Fatalf("Marshal failed: %v", err)
 	}
 
-	var decoded map[string]interface{}
+	var decoded Encrypted
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("Failed to unmarshal: %v", err)
+		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
-	keyset, ok := decoded["keyset"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Expected keyset to be an object")
+	if decoded.Identifier.Table != "t" || decoded.Identifier.Column != "c" {
+		t.Errorf("identifier: got t=%q c=%q", decoded.Identifier.Table, decoded.Identifier.Column)
 	}
-
-	if keyset["name"] != "my-keyset" {
-		t.Errorf("Expected keyset.name='my-keyset', got '%v'", keyset["name"])
+	if *decoded.Ciphertext != "cipher" {
+		t.Errorf("ciphertext: got %q, want %q", *decoded.Ciphertext, "cipher")
 	}
-}
-
-// TestQueryOpConstants tests the QueryOp constants
-func TestQueryOpConstants(t *testing.T) {
-	tests := []struct {
-		name     string
-		constant QueryOp
-		expected string
-	}{
-		{"Default", QueryOpDefault, "default"},
-		{"SteVecSelector", QueryOpSteVecSelector, "ste_vec_selector"},
-		{"SteVecTerm", QueryOpSteVecTerm, "ste_vec_term"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if string(tc.constant) != tc.expected {
-				t.Errorf("Expected %s, got %s", tc.expected, string(tc.constant))
-			}
-		})
+	if decoded.UniqueIndex == nil || *decoded.UniqueIndex != "hmac" {
+		t.Errorf("uniqueIndex: got %v, want %q", decoded.UniqueIndex, "hmac")
 	}
 }
 
-// TestIndexTypeConstants tests the IndexType constants
-func TestIndexTypeConstants(t *testing.T) {
-	tests := []struct {
-		name     string
-		constant IndexType
-		expected string
-	}{
-		{"Ore", IndexTypeOre, "ore"},
-		{"Unique", IndexTypeUnique, "unique"},
-		{"Match", IndexTypeMatch, "match"},
-		{"SteVec", IndexTypeSteVec, "ste_vec"},
-	}
+// ---------------------------------------------------------------------------
+// DecryptResult tests
+// ---------------------------------------------------------------------------
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if string(tc.constant) != tc.expected {
-				t.Errorf("Expected %s, got %s", tc.expected, string(tc.constant))
-			}
-		})
-	}
+func TestDecryptResult(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		r := DecryptResult{Data: "hello"}
+		if r.Data != "hello" {
+			t.Errorf("Data: got %v, want %q", r.Data, "hello")
+		}
+		if r.Err != nil {
+			t.Errorf("Err: got %v, want nil", r.Err)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		r := DecryptResult{Err: errors.New("failed")}
+		if r.Data != nil {
+			t.Errorf("Data: got %v, want nil", r.Data)
+		}
+		if r.Err == nil || r.Err.Error() != "failed" {
+			t.Errorf("Err: got %v, want 'failed'", r.Err)
+		}
+	})
+
+	t.Run("numeric data", func(t *testing.T) {
+		t.Parallel()
+		r := DecryptResult{Data: 42.0}
+		if r.Data != 42.0 {
+			t.Errorf("Data: got %v, want 42.0", r.Data)
+		}
+	})
+
+	t.Run("nil data", func(t *testing.T) {
+		t.Parallel()
+		r := DecryptResult{}
+		if r.Data != nil {
+			t.Errorf("Data: got %v, want nil", r.Data)
+		}
+	})
 }
 
-// TestEncryptQueryOptions tests the EncryptQueryOptions structure
-func TestEncryptQueryOptions(t *testing.T) {
-	opts := EncryptQueryOptions{
-		Plaintext: "search-term",
-		Column:    "email",
-		Table:     "users",
-		IndexType: IndexTypeMatch,
-		QueryOp:   QueryOpDefault,
-	}
+// ---------------------------------------------------------------------------
+// Error and sentinel tests
+// ---------------------------------------------------------------------------
 
-	if opts.Plaintext != "search-term" {
-		t.Errorf("Expected plaintext 'search-term', got '%v'", opts.Plaintext)
-	}
+func TestErrorSentinels(t *testing.T) {
+	t.Parallel()
 
-	if opts.IndexType != IndexTypeMatch {
-		t.Errorf("Expected IndexTypeMatch, got '%s'", opts.IndexType)
-	}
-
-	if opts.QueryOp != QueryOpDefault {
-		t.Errorf("Expected QueryOpDefault, got '%s'", opts.QueryOp)
-	}
-}
-
-// TestEncryptQueryOptionsJSON tests JSON serialization of EncryptQueryOptions
-func TestEncryptQueryOptionsJSON(t *testing.T) {
-	opts := EncryptQueryOptions{
-		Plaintext: "test",
-		Column:    "email",
-		Table:     "users",
-		IndexType: IndexTypeOre,
-	}
-
-	data, err := json.Marshal(opts)
-	if err != nil {
-		t.Fatalf("Failed to marshal: %v", err)
-	}
-
-	var decoded map[string]interface{}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("Failed to unmarshal: %v", err)
-	}
-
-	if decoded["indexType"] != "ore" {
-		t.Errorf("Expected indexType='ore', got '%v'", decoded["indexType"])
-	}
-
-	// queryOp should be omitted when zero value
-	if _, exists := decoded["queryOp"]; exists {
-		t.Error("Expected queryOp to be omitted when empty")
-	}
-}
-
-// TestQueryPayload tests the QueryPayload structure
-func TestQueryPayload(t *testing.T) {
-	payload := QueryPayload{
-		Plaintext: "search",
-		Column:    "name",
-		Table:     "users",
-		IndexType: IndexTypeSteVec,
-		QueryOp:   QueryOpSteVecTerm,
-	}
-
-	if payload.IndexType != IndexTypeSteVec {
-		t.Errorf("Expected IndexTypeSteVec, got '%s'", payload.IndexType)
-	}
-
-	if payload.QueryOp != QueryOpSteVecTerm {
-		t.Errorf("Expected QueryOpSteVecTerm, got '%s'", payload.QueryOp)
-	}
-}
-
-// TestEncryptQueryBulkOptions tests the EncryptQueryBulkOptions structure
-func TestEncryptQueryBulkOptions(t *testing.T) {
-	opts := EncryptQueryBulkOptions{
-		Queries: []QueryPayload{
-			{
-				Plaintext: "term1",
-				Column:    "email",
-				Table:     "users",
-				IndexType: IndexTypeMatch,
-			},
-			{
-				Plaintext: "term2",
-				Column:    "name",
-				Table:     "users",
-				IndexType: IndexTypeOre,
-			},
-		},
-	}
-
-	if len(opts.Queries) != 2 {
-		t.Errorf("Expected 2 queries, got %d", len(opts.Queries))
-	}
-
-	if opts.Queries[0].Plaintext != "term1" {
-		t.Errorf("Expected 'term1', got '%v'", opts.Queries[0].Plaintext)
-	}
-
-	if opts.Queries[1].IndexType != IndexTypeOre {
-		t.Errorf("Expected IndexTypeOre, got '%s'", opts.Queries[1].IndexType)
-	}
-}
-
-// TestEncryptionError tests the EncryptionError type
-func TestEncryptionError(t *testing.T) {
-	err := &EncryptionError{
-		Code:    ErrUnknownColumn,
-		Message: "column 'foo' not found in Encrypt config",
-	}
-
-	if err.Error() != "column 'foo' not found in Encrypt config" {
-		t.Errorf("Expected error message, got '%s'", err.Error())
-	}
-
-	if err.Code != ErrUnknownColumn {
-		t.Errorf("Expected ErrUnknownColumn, got '%s'", err.Code)
-	}
-
-	// Test that it implements the error interface
-	var e error = err
-	if e == nil {
-		t.Error("Expected non-nil error")
-	}
-}
-
-// TestEncryptionErrorUnwrap tests that EncryptionError can be matched with errors.As
-func TestEncryptionErrorUnwrap(t *testing.T) {
-	err := newEncryptionError("column 'foo' not found in Encrypt config")
-
-	var encErr *EncryptionError
-	if !errors.As(err, &encErr) {
-		t.Error("Expected errors.As to match EncryptionError")
-	}
-
-	if encErr.Code != ErrUnknownColumn {
-		t.Errorf("Expected ErrUnknownColumn, got '%s'", encErr.Code)
-	}
-}
-
-// TestInferErrorCode tests the error code inference from messages
-func TestInferErrorCode(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected ErrorCode
+		sentinel error
 	}{
 		{
 			"invariant violation",
@@ -936,76 +544,323 @@ func TestInferErrorCode(t *testing.T) {
 		{
 			"invalid json path",
 			"Invalid JSON path: $.foo.bar",
-			ErrInvalidJsonPath,
+			ErrInvalidJSONPath,
 		},
 		{
-			"ste_vec requires json cast_as",
+			"ste_vec requires json",
 			"ste_vec index requires cast_as to be json",
-			ErrSteVecRequiresJsonCastAs,
-		},
-		{
-			"unknown error",
-			"something completely unexpected happened",
-			ErrUnknown,
+			ErrSteVecRequiresJSON,
 		},
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			code := inferErrorCode(tc.message)
-			if code != tc.expected {
-				t.Errorf("Expected %s, got %s", tc.expected, code)
+			t.Parallel()
+			err := newError("Test", tc.message)
+			if !errors.Is(err, tc.sentinel) {
+				t.Errorf("errors.Is(err, %v) = false, want true", tc.sentinel)
+			}
+			if err.Error() != tc.message {
+				t.Errorf("Error(): got %q, want %q", err.Error(), tc.message)
+			}
+			if err.Op != "Test" {
+				t.Errorf("Op: got %q, want %q", err.Op, "Test")
 			}
 		})
 	}
 }
 
-// TestNewEncryptionError tests the newEncryptionError constructor
-func TestNewEncryptionError(t *testing.T) {
-	err := newEncryptionError("column 'email' not found in Encrypt config")
+func TestErrorUnknownMessage(t *testing.T) {
+	t.Parallel()
 
-	if err.Code != ErrUnknownColumn {
-		t.Errorf("Expected ErrUnknownColumn, got '%s'", err.Code)
+	err := newError("Test", "something completely unexpected happened")
+
+	// Should not match any sentinel.
+	if errors.Is(err, ErrUnknownColumn) {
+		t.Error("should not match ErrUnknownColumn")
+	}
+	if errors.Is(err, ErrMissingIndex) {
+		t.Error("should not match ErrMissingIndex")
 	}
 
-	if err.Message != "column 'email' not found in Encrypt config" {
-		t.Errorf("Unexpected message: '%s'", err.Message)
+	// The wrapped Err should be nil.
+	var protectErr *Error
+	if !errors.As(err, &protectErr) {
+		t.Fatal("errors.As should match *Error")
+	}
+	if protectErr.Err != nil {
+		t.Errorf("Err: got %v, want nil", protectErr.Err)
 	}
 }
 
-// TestPlaintextPayloadMultiType tests PlaintextPayload with different types
-func TestPlaintextPayloadMultiType(t *testing.T) {
-	tests := []struct {
-		name      string
-		plaintext interface{}
-	}{
-		{"string", "hello"},
-		{"number", 42},
-		{"boolean", true},
-		{"json", map[string]interface{}{"nested": "value"}},
+func TestErrorClientClosed(t *testing.T) {
+	t.Parallel()
+
+	err := &Error{Op: "Encrypt", Err: ErrClientClosed, Message: "protect: client is closed"}
+
+	if !errors.Is(err, ErrClientClosed) {
+		t.Error("errors.Is(err, ErrClientClosed) = false, want true")
+	}
+	if err.Error() != "protect: client is closed" {
+		t.Errorf("Error(): got %q", err.Error())
+	}
+}
+
+func TestErrorImplementsErrorInterface(t *testing.T) {
+	t.Parallel()
+
+	var e error = &Error{Op: "Test", Message: "test error"}
+	if e.Error() != "test error" {
+		t.Errorf("Error(): got %q, want %q", e.Error(), "test error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer and index opts tests
+// ---------------------------------------------------------------------------
+
+func TestTokenizer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		tok := Tokenizer{Kind: "standard"}
+		if tok.Kind != "standard" {
+			t.Errorf("Kind: got %q, want %q", tok.Kind, "standard")
+		}
+		if tok.TokenLength != nil {
+			t.Error("TokenLength: expected nil")
+		}
+	})
+
+	t.Run("ngram", func(t *testing.T) {
+		t.Parallel()
+		tl := 3
+		tok := Tokenizer{Kind: "ngram", TokenLength: &tl}
+		if tok.Kind != "ngram" {
+			t.Errorf("Kind: got %q, want %q", tok.Kind, "ngram")
+		}
+		if tok.TokenLength == nil || *tok.TokenLength != 3 {
+			t.Errorf("TokenLength: got %v, want 3", tok.TokenLength)
+		}
+	})
+}
+
+func TestMatchIndexOpts(t *testing.T) {
+	t.Parallel()
+
+	k := 8
+	m := 1024
+	includeOriginal := true
+
+	opts := MatchIndexOpts{
+		Tokenizer:       &Tokenizer{Kind: "standard"},
+		TokenFilters:    []TokenFilter{{Kind: "downcase"}, {Kind: "trim"}},
+		K:               &k,
+		M:               &m,
+		IncludeOriginal: &includeOriginal,
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			payload := PlaintextPayload{
-				Plaintext: tc.plaintext,
-				Column:    "data",
-				Table:     "test",
-			}
-
-			data, err := json.Marshal(payload)
-			if err != nil {
-				t.Fatalf("Failed to marshal: %v", err)
-			}
-
-			var decoded map[string]interface{}
-			if err := json.Unmarshal(data, &decoded); err != nil {
-				t.Fatalf("Failed to unmarshal: %v", err)
-			}
-
-			if decoded["plaintext"] == nil {
-				t.Error("Expected plaintext to be present")
-			}
-		})
+	if opts.Tokenizer.Kind != "standard" {
+		t.Errorf("tokenizer kind: got %q, want %q", opts.Tokenizer.Kind, "standard")
 	}
+	if len(opts.TokenFilters) != 2 {
+		t.Errorf("token filters: got %d, want 2", len(opts.TokenFilters))
+	}
+	if *opts.K != 8 {
+		t.Errorf("K: got %d, want 8", *opts.K)
+	}
+	if *opts.M != 1024 {
+		t.Errorf("M: got %d, want 1024", *opts.M)
+	}
+}
+
+func TestSteVecIndexOpts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("basic", func(t *testing.T) {
+		t.Parallel()
+		opts := SteVecIndexOpts{Prefix: "users"}
+		if opts.Prefix != "users" {
+			t.Errorf("Prefix: got %q, want %q", opts.Prefix, "users")
+		}
+	})
+
+	t.Run("with term filters and array index mode", func(t *testing.T) {
+		t.Parallel()
+		mode := "flatten"
+		opts := SteVecIndexOpts{
+			Prefix:         "products",
+			TermFilters:    []TokenFilter{{Kind: "downcase"}},
+			ArrayIndexMode: &mode,
+		}
+		if opts.Prefix != "products" {
+			t.Errorf("Prefix: got %q, want %q", opts.Prefix, "products")
+		}
+		if len(opts.TermFilters) != 1 {
+			t.Errorf("TermFilters: got %d, want 1", len(opts.TermFilters))
+		}
+		if opts.ArrayIndexMode == nil || *opts.ArrayIndexMode != "flatten" {
+			t.Errorf("ArrayIndexMode: got %v, want %q", opts.ArrayIndexMode, "flatten")
+		}
+	})
+
+	t.Run("json round-trip", func(t *testing.T) {
+		t.Parallel()
+		mode := "flatten"
+		opts := SteVecIndexOpts{
+			Prefix:         "test",
+			TermFilters:    []TokenFilter{{Kind: "downcase"}},
+			ArrayIndexMode: &mode,
+		}
+
+		data, err := json.Marshal(opts)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var decoded SteVecIndexOpts
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+
+		if decoded.Prefix != "test" {
+			t.Errorf("Prefix: got %q, want %q", decoded.Prefix, "test")
+		}
+		if decoded.ArrayIndexMode == nil || *decoded.ArrayIndexMode != "flatten" {
+			t.Errorf("ArrayIndexMode: got %v, want %q", decoded.ArrayIndexMode, "flatten")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// PlaintextItem and QueryItem tests
+// ---------------------------------------------------------------------------
+
+func TestPlaintextItem(t *testing.T) {
+	t.Parallel()
+
+	col := ColumnRef{table: "users", column: "email"}
+	item := PlaintextItem{
+		Column:    col,
+		Plaintext: "alice@example.com",
+	}
+
+	if item.Column.table != "users" || item.Column.column != "email" {
+		t.Errorf("Column: got table=%q column=%q", item.Column.table, item.Column.column)
+	}
+	if item.Plaintext != "alice@example.com" {
+		t.Errorf("Plaintext: got %v, want %q", item.Plaintext, "alice@example.com")
+	}
+}
+
+func TestQueryItem(t *testing.T) {
+	t.Parallel()
+
+	col := ColumnRef{table: "users", column: "name"}
+	item := QueryItem{
+		Column:    col,
+		QueryType: FreeTextSearch,
+		Plaintext: "john",
+	}
+
+	if item.QueryType != FreeTextSearch {
+		t.Errorf("QueryType: got %q, want %q", item.QueryType, FreeTextSearch)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EncryptConfig structure tests
+// ---------------------------------------------------------------------------
+
+func TestEncryptConfigStructure(t *testing.T) {
+	t.Parallel()
+
+	castAs := CastAsText
+	config := EncryptConfig{
+		Version: 1,
+		Tables: Tables{
+			"users": Table{
+				"email": Column{
+					CastAs: &castAs,
+					Indexes: &Indexes{
+						OreIndex: &OreIndexOpts{},
+						UniqueIndex: &UniqueIndexOpts{
+							TokenFilters: []TokenFilter{{Kind: "downcase"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if config.Version != 1 {
+		t.Errorf("version: got %d, want 1", config.Version)
+	}
+
+	usersTable, exists := config.Tables["users"]
+	if !exists {
+		t.Fatal("missing users table")
+	}
+
+	emailColumn, exists := usersTable["email"]
+	if !exists {
+		t.Fatal("missing email column")
+	}
+
+	if *emailColumn.CastAs != CastAsText {
+		t.Errorf("CastAs: got %v, want %q", *emailColumn.CastAs, CastAsText)
+	}
+
+	if emailColumn.Indexes.OreIndex == nil {
+		t.Error("expected OreIndex")
+	}
+
+	if emailColumn.Indexes.UniqueIndex == nil {
+		t.Error("expected UniqueIndex")
+	}
+
+	if len(emailColumn.Indexes.UniqueIndex.TokenFilters) != 1 {
+		t.Errorf("token filters: got %d, want 1", len(emailColumn.Indexes.UniqueIndex.TokenFilters))
+	}
+
+	if emailColumn.Indexes.UniqueIndex.TokenFilters[0].Kind != "downcase" {
+		t.Errorf("token filter: got %q, want %q", emailColumn.Indexes.UniqueIndex.TokenFilters[0].Kind, "downcase")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LockContext tests
+// ---------------------------------------------------------------------------
+
+func TestLockContextJSON(t *testing.T) {
+	t.Parallel()
+
+	lc := LockContext{IdentityClaim: []string{"user:123", "org:456"}}
+
+	data, err := json.Marshal(lc)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var decoded LockContext
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(decoded.IdentityClaim) != 2 {
+		t.Fatalf("IdentityClaim: got %d, want 2", len(decoded.IdentityClaim))
+	}
+	if decoded.IdentityClaim[0] != "user:123" || decoded.IdentityClaim[1] != "org:456" {
+		t.Errorf("IdentityClaim: got %v", decoded.IdentityClaim)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func castPtr(c CastAs) *CastAs {
+	return &c
 }
