@@ -15,7 +15,7 @@ package protect
 import "C"
 import (
 	"encoding/json"
-	"errors"
+	"strings"
 	"unsafe"
 )
 
@@ -28,16 +28,69 @@ type Client struct {
 type CastAs string
 
 const (
-	CastAsBigInt   CastAs = "big_int"
-	CastAsBoolean  CastAs = "boolean"
-	CastAsDate     CastAs = "date"
-	CastAsReal     CastAs = "real"
-	CastAsDouble   CastAs = "double"
-	CastAsInt      CastAs = "int"
-	CastAsSmallInt CastAs = "small_int"
-	CastAsText     CastAs = "text"
-	CastAsJsonB    CastAs = "jsonb"
+	CastAsBigInt  CastAs = "bigint"
+	CastAsBoolean CastAs = "boolean"
+	CastAsDate    CastAs = "date"
+	CastAsNumber  CastAs = "number"
+	CastAsString  CastAs = "string"
+	CastAsText    CastAs = "text"
+	CastAsJson    CastAs = "json"
 )
+
+// ErrorCode represents a structured error code returned by the FFI layer
+type ErrorCode string
+
+const (
+	ErrInvariantViolation       ErrorCode = "INVARIANT_VIOLATION"
+	ErrUnknownQueryOp           ErrorCode = "UNKNOWN_QUERY_OP"
+	ErrUnknownColumn            ErrorCode = "UNKNOWN_COLUMN"
+	ErrMissingIndex             ErrorCode = "MISSING_INDEX"
+	ErrInvalidQueryInput        ErrorCode = "INVALID_QUERY_INPUT"
+	ErrInvalidJsonPath          ErrorCode = "INVALID_JSON_PATH"
+	ErrSteVecRequiresJsonCastAs ErrorCode = "STE_VEC_REQUIRES_JSON_CAST_AS"
+	ErrUnknown                  ErrorCode = "UNKNOWN"
+)
+
+// EncryptionError represents a structured error from the encryption FFI layer.
+type EncryptionError struct {
+	Code    ErrorCode
+	Message string
+}
+
+// Error implements the error interface.
+func (e *EncryptionError) Error() string {
+	return e.Message
+}
+
+// inferErrorCode infers an error code from the error message returned by the FFI layer.
+func inferErrorCode(msg string) ErrorCode {
+	switch {
+	case strings.Contains(msg, "invariant violation"):
+		return ErrInvariantViolation
+	case strings.Contains(msg, "Unknown query operation"):
+		return ErrUnknownQueryOp
+	case strings.Contains(msg, "not found in Encrypt config"):
+		return ErrUnknownColumn
+	case strings.Contains(msg, "does not have a"):
+		return ErrMissingIndex
+	case strings.Contains(msg, "Invalid query input"):
+		return ErrInvalidQueryInput
+	case strings.Contains(msg, "Invalid JSON path"):
+		return ErrInvalidJsonPath
+	case strings.Contains(msg, "ste_vec index requires cast_as"):
+		return ErrSteVecRequiresJsonCastAs
+	default:
+		return ErrUnknown
+	}
+}
+
+// newEncryptionError creates a new EncryptionError with an inferred error code.
+func newEncryptionError(msg string) *EncryptionError {
+	return &EncryptionError{
+		Code:    inferErrorCode(msg),
+		Message: msg,
+	}
+}
 
 // Identifier represents a table and column identifier
 type Identifier struct {
@@ -83,7 +136,9 @@ type Tokenizer struct {
 
 // SteVecIndexOpts represents options for SteVec index
 type SteVecIndexOpts struct {
-	Prefix string `json:"prefix"`
+	Prefix         string        `json:"prefix"`
+	TermFilters    []TokenFilter `json:"term_filters,omitempty"`
+	ArrayIndexMode *string       `json:"array_index_mode,omitempty"`
 }
 
 // Indexes represents the indexes configuration for a column
@@ -112,12 +167,19 @@ type EncryptConfig struct {
 	Tables  Tables `json:"tables"`
 }
 
+// KeysetConfig represents keyset configuration for the client
+type KeysetConfig struct {
+	Name *string `json:"name,omitempty"`
+	ID   *string `json:"id,omitempty"`
+}
+
 // ClientOpts represents client configuration options
 type ClientOpts struct {
-	WorkspaceCrn *string `json:"workspaceCrn,omitempty"`
-	AccessKey    *string `json:"accessKey,omitempty"`
-	ClientID     *string `json:"clientId,omitempty"`
-	ClientKey    *string `json:"clientKey,omitempty"`
+	WorkspaceCrn *string       `json:"workspaceCrn,omitempty"`
+	AccessKey    *string       `json:"accessKey,omitempty"`
+	ClientID     *string       `json:"clientId,omitempty"`
+	ClientKey    *string       `json:"clientKey,omitempty"`
+	Keyset       *KeysetConfig `json:"keyset,omitempty"`
 }
 
 // NewClientOptions represents options for creating a new client
@@ -133,7 +195,7 @@ type LockContext struct {
 
 // EncryptOptions represents options for encryption
 type EncryptOptions struct {
-	Plaintext         string       `json:"plaintext"`
+	Plaintext         interface{}  `json:"plaintext"`
 	Column            string       `json:"column"`
 	Table             string       `json:"table"`
 	LockContext       *LockContext `json:"lockContext,omitempty"`
@@ -143,7 +205,7 @@ type EncryptOptions struct {
 
 // PlaintextPayload represents a single plaintext item for bulk encryption
 type PlaintextPayload struct {
-	Plaintext   string       `json:"plaintext"`
+	Plaintext   interface{}  `json:"plaintext"`
 	Column      string       `json:"column"`
 	Table       string       `json:"table"`
 	LockContext *LockContext `json:"lockContext,omitempty"`
@@ -158,7 +220,7 @@ type EncryptBulkOptions struct {
 
 // DecryptOptions represents options for decryption
 type DecryptOptions struct {
-	Ciphertext        string       `json:"ciphertext"`
+	Ciphertext        *Encrypted   `json:"ciphertext"`
 	LockContext       *LockContext `json:"lockContext,omitempty"`
 	ServiceToken      *string      `json:"serviceToken,omitempty"`
 	UnverifiedContext interface{}  `json:"unverifiedContext,omitempty"`
@@ -166,7 +228,7 @@ type DecryptOptions struct {
 
 // BulkDecryptPayload represents a single ciphertext item for bulk decryption
 type BulkDecryptPayload struct {
-	Ciphertext  string       `json:"ciphertext"`
+	Ciphertext  *Encrypted   `json:"ciphertext"`
 	LockContext *LockContext `json:"lockContext,omitempty"`
 }
 
@@ -179,22 +241,67 @@ type DecryptBulkOptions struct {
 
 // Encrypted represents an encrypted value with its metadata
 type Encrypted struct {
-	Kind string `json:"k"`
-	// For ciphertext type
-	Ciphertext  *string    `json:"c,omitempty"`
-	OreIndex    *[]string  `json:"ob,omitempty"`
-	MatchIndex  *[]uint16  `json:"bf,omitempty"`
-	UniqueIndex *string    `json:"hm,omitempty"`
-	Identifier  Identifier `json:"i"`
-	Version     uint16     `json:"v"`
-	// For SteVec type
+	Identifier  Identifier  `json:"i"`
+	Version     uint16      `json:"v"`
+	Ciphertext  *string     `json:"c,omitempty"`
+	OreIndex    *[]string   `json:"ob,omitempty"`
+	MatchIndex  *[]uint16   `json:"bf,omitempty"`
+	UniqueIndex *string     `json:"hm,omitempty"`
 	SteVecIndex interface{} `json:"sv,omitempty"`
 }
 
 // DecryptResult represents the result of a fallible decryption operation
 type DecryptResult struct {
-	Data  *string `json:"data,omitempty"`
-	Error *string `json:"error,omitempty"`
+	Data  interface{} `json:"data,omitempty"`
+	Error *string     `json:"error,omitempty"`
+}
+
+// QueryOp represents the type of query operation for encrypted search
+type QueryOp string
+
+const (
+	QueryOpDefault        QueryOp = "default"
+	QueryOpSteVecSelector QueryOp = "ste_vec_selector"
+	QueryOpSteVecTerm     QueryOp = "ste_vec_term"
+)
+
+// IndexType represents the type of index to use for encrypted search
+type IndexType string
+
+const (
+	IndexTypeOre    IndexType = "ore"
+	IndexTypeUnique IndexType = "unique"
+	IndexTypeMatch  IndexType = "match"
+	IndexTypeSteVec IndexType = "ste_vec"
+)
+
+// EncryptQueryOptions represents options for encrypting a query value
+type EncryptQueryOptions struct {
+	Plaintext         interface{}  `json:"plaintext"`
+	Column            string       `json:"column"`
+	Table             string       `json:"table"`
+	IndexType         IndexType    `json:"indexType"`
+	QueryOp           QueryOp      `json:"queryOp,omitempty"`
+	LockContext       *LockContext `json:"lockContext,omitempty"`
+	ServiceToken      *string      `json:"serviceToken,omitempty"`
+	UnverifiedContext interface{}  `json:"unverifiedContext,omitempty"`
+}
+
+// QueryPayload represents a single query item for bulk query encryption
+type QueryPayload struct {
+	Plaintext   interface{}  `json:"plaintext"`
+	Column      string       `json:"column"`
+	Table       string       `json:"table"`
+	IndexType   IndexType    `json:"indexType"`
+	QueryOp     QueryOp      `json:"queryOp,omitempty"`
+	LockContext *LockContext `json:"lockContext,omitempty"`
+}
+
+// EncryptQueryBulkOptions represents options for bulk query encryption
+type EncryptQueryBulkOptions struct {
+	Queries           []QueryPayload `json:"queries"`
+	ServiceToken      *string        `json:"serviceToken,omitempty"`
+	UnverifiedContext interface{}    `json:"unverifiedContext,omitempty"`
 }
 
 // NewClient creates a new protect FFI client
@@ -212,7 +319,7 @@ func NewClient(options NewClientOptions) (*Client, error) {
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
 	}
 
 	return &Client{ptr: unsafe.Pointer(result.data)}, nil
@@ -229,7 +336,7 @@ func (c *Client) Free() {
 // Encrypt encrypts a single plaintext value
 func (c *Client) Encrypt(options EncryptOptions) (*Encrypted, error) {
 	if c.ptr == nil {
-		return nil, errors.New("client has been freed")
+		return nil, newEncryptionError("client has been freed")
 	}
 
 	optionsJSON, err := json.Marshal(options)
@@ -245,7 +352,7 @@ func (c *Client) Encrypt(options EncryptOptions) (*Encrypted, error) {
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -262,7 +369,7 @@ func (c *Client) Encrypt(options EncryptOptions) (*Encrypted, error) {
 // EncryptBulk encrypts multiple plaintext values
 func (c *Client) EncryptBulk(options EncryptBulkOptions) ([]Encrypted, error) {
 	if c.ptr == nil {
-		return nil, errors.New("client has been freed")
+		return nil, newEncryptionError("client has been freed")
 	}
 
 	optionsJSON, err := json.Marshal(options)
@@ -278,7 +385,73 @@ func (c *Client) EncryptBulk(options EncryptBulkOptions) ([]Encrypted, error) {
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
+	}
+
+	encryptedJSON := C.GoString(result.data)
+	C.protect_free_string(result.data)
+
+	var encrypted []Encrypted
+	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
+		return nil, err
+	}
+
+	return encrypted, nil
+}
+
+// EncryptQuery encrypts a value for searching against encrypted columns
+func (c *Client) EncryptQuery(options EncryptQueryOptions) (*Encrypted, error) {
+	if c.ptr == nil {
+		return nil, newEncryptionError("client has been freed")
+	}
+
+	optionsJSON, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+
+	cOptionsJSON := C.CString(string(optionsJSON))
+	defer C.free(unsafe.Pointer(cOptionsJSON))
+
+	result := C.protect_encrypt_query((*C.struct_Client)(c.ptr), cOptionsJSON)
+
+	if !result.success {
+		errorStr := C.GoString(result.error)
+		C.protect_free_string(result.error)
+		return nil, newEncryptionError(errorStr)
+	}
+
+	encryptedJSON := C.GoString(result.data)
+	C.protect_free_string(result.data)
+
+	var encrypted Encrypted
+	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
+		return nil, err
+	}
+
+	return &encrypted, nil
+}
+
+// EncryptQueryBulk encrypts multiple values for searching against encrypted columns
+func (c *Client) EncryptQueryBulk(options EncryptQueryBulkOptions) ([]Encrypted, error) {
+	if c.ptr == nil {
+		return nil, newEncryptionError("client has been freed")
+	}
+
+	optionsJSON, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+
+	cOptionsJSON := C.CString(string(optionsJSON))
+	defer C.free(unsafe.Pointer(cOptionsJSON))
+
+	result := C.protect_encrypt_query_bulk((*C.struct_Client)(c.ptr), cOptionsJSON)
+
+	if !result.success {
+		errorStr := C.GoString(result.error)
+		C.protect_free_string(result.error)
+		return nil, newEncryptionError(errorStr)
 	}
 
 	encryptedJSON := C.GoString(result.data)
@@ -293,14 +466,14 @@ func (c *Client) EncryptBulk(options EncryptBulkOptions) ([]Encrypted, error) {
 }
 
 // Decrypt decrypts a single ciphertext value
-func (c *Client) Decrypt(options DecryptOptions) (string, error) {
+func (c *Client) Decrypt(options DecryptOptions) (interface{}, error) {
 	if c.ptr == nil {
-		return "", errors.New("client has been freed")
+		return nil, newEncryptionError("client has been freed")
 	}
 
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -311,19 +484,24 @@ func (c *Client) Decrypt(options DecryptOptions) (string, error) {
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return "", errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
 	}
 
-	plaintext := C.GoString(result.data)
+	plaintextJSON := C.GoString(result.data)
 	C.protect_free_string(result.data)
+
+	var plaintext interface{}
+	if err := json.Unmarshal([]byte(plaintextJSON), &plaintext); err != nil {
+		return nil, err
+	}
 
 	return plaintext, nil
 }
 
 // DecryptBulk decrypts multiple ciphertext values
-func (c *Client) DecryptBulk(options DecryptBulkOptions) ([]string, error) {
+func (c *Client) DecryptBulk(options DecryptBulkOptions) ([]interface{}, error) {
 	if c.ptr == nil {
-		return nil, errors.New("client has been freed")
+		return nil, newEncryptionError("client has been freed")
 	}
 
 	optionsJSON, err := json.Marshal(options)
@@ -339,13 +517,13 @@ func (c *Client) DecryptBulk(options DecryptBulkOptions) ([]string, error) {
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
 	}
 
 	plaintextJSON := C.GoString(result.data)
 	C.protect_free_string(result.data)
 
-	var plaintexts []string
+	var plaintexts []interface{}
 	if err := json.Unmarshal([]byte(plaintextJSON), &plaintexts); err != nil {
 		return nil, err
 	}
@@ -356,7 +534,7 @@ func (c *Client) DecryptBulk(options DecryptBulkOptions) ([]string, error) {
 // DecryptBulkFallible decrypts multiple ciphertext values with individual error handling
 func (c *Client) DecryptBulkFallible(options DecryptBulkOptions) ([]DecryptResult, error) {
 	if c.ptr == nil {
-		return nil, errors.New("client has been freed")
+		return nil, newEncryptionError("client has been freed")
 	}
 
 	optionsJSON, err := json.Marshal(options)
@@ -372,7 +550,7 @@ func (c *Client) DecryptBulkFallible(options DecryptBulkOptions) ([]DecryptResul
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, errors.New(errorStr)
+		return nil, newEncryptionError(errorStr)
 	}
 
 	resultsJSON := C.GoString(result.data)
@@ -384,4 +562,18 @@ func (c *Client) DecryptBulkFallible(options DecryptBulkOptions) ([]DecryptResul
 	}
 
 	return results, nil
+}
+
+// IsEncrypted checks if a value is a valid encrypted payload.
+// This is a standalone function that does not require a Client.
+func IsEncrypted(value interface{}) bool {
+	valueJSON, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+
+	cValueJSON := C.CString(string(valueJSON))
+	defer C.free(unsafe.Pointer(cValueJSON))
+
+	return bool(C.protect_is_encrypted(cValueJSON))
 }

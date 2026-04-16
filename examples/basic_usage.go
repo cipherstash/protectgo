@@ -35,11 +35,20 @@ func main() {
 						},
 					},
 				},
+				"age": protect.Column{
+					CastAs: ptr(protect.CastAsNumber),
+					Indexes: &protect.Indexes{
+						OreIndex: &protect.OreIndexOpts{},
+					},
+				},
+				"active": protect.Column{
+					CastAs: ptr(protect.CastAsBoolean),
+				},
 			},
 		},
 	}
 
-	// Create client options
+	// Create client options with optional keyset configuration
 	clientOpts := protect.NewClientOptions{
 		EncryptConfig: config,
 		ClientOpts: &protect.ClientOpts{
@@ -47,6 +56,9 @@ func main() {
 			AccessKey:    ptr(os.Getenv("CIPHERSTASH_ACCESS_KEY")),
 			ClientID:     ptr(os.Getenv("CIPHERSTASH_CLIENT_ID")),
 			ClientKey:    ptr(os.Getenv("CIPHERSTASH_CLIENT_KEY")),
+			Keyset: &protect.KeysetConfig{
+				Name: ptr("my-keyset"),
+			},
 		},
 	}
 
@@ -57,7 +69,7 @@ func main() {
 	}
 	defer client.Free()
 
-	// Example 1: Encrypt a single value
+	// Example 1: Encrypt a string value
 	encryptOpts := protect.EncryptOptions{
 		Plaintext: "john.doe@example.com",
 		Table:     "users",
@@ -77,9 +89,33 @@ func main() {
 		fmt.Printf("Unique index: %s\n", *encrypted.UniqueIndex)
 	}
 
-	// Example 2: Decrypt the value
+	// Example 2: Encrypt a numeric value
+	ageEncrypted, err := client.Encrypt(protect.EncryptOptions{
+		Plaintext: 30,
+		Table:     "users",
+		Column:    "age",
+	})
+	if err != nil {
+		log.Fatalf("Failed to encrypt age: %v", err)
+	}
+
+	fmt.Printf("Encrypted age ciphertext: %s\n", *ageEncrypted.Ciphertext)
+
+	// Example 3: Encrypt a boolean value
+	activeEncrypted, err := client.Encrypt(protect.EncryptOptions{
+		Plaintext: true,
+		Table:     "users",
+		Column:    "active",
+	})
+	if err != nil {
+		log.Fatalf("Failed to encrypt active: %v", err)
+	}
+
+	fmt.Printf("Encrypted active ciphertext: %s\n", *activeEncrypted.Ciphertext)
+
+	// Example 4: Decrypt the value (returns interface{})
 	decryptOpts := protect.DecryptOptions{
-		Ciphertext: *encrypted.Ciphertext,
+		Ciphertext: encrypted,
 	}
 
 	plaintext, err := client.Decrypt(decryptOpts)
@@ -87,9 +123,32 @@ func main() {
 		log.Fatalf("Failed to decrypt: %v", err)
 	}
 
-	fmt.Printf("Decrypted email: %s\n", plaintext)
+	fmt.Printf("Decrypted email: %v\n", plaintext)
 
-	// Example 3: Bulk encryption
+	// Example 5: Check if a value is encrypted
+	if protect.IsEncrypted(encrypted) {
+		fmt.Println("Value is encrypted")
+	}
+
+	if !protect.IsEncrypted("not encrypted") {
+		fmt.Println("Plain string is not encrypted")
+	}
+
+	// Example 6: Encrypt a query for searching
+	queryEncrypted, err := client.EncryptQuery(protect.EncryptQueryOptions{
+		Plaintext: "john",
+		Column:    "name",
+		Table:     "users",
+		IndexType: protect.IndexTypeMatch,
+		QueryOp:   protect.QueryOpDefault,
+	})
+	if err != nil {
+		log.Fatalf("Failed to encrypt query: %v", err)
+	}
+
+	fmt.Printf("Encrypted query match index: %v\n", queryEncrypted.MatchIndex)
+
+	// Example 7: Bulk encryption with mixed types
 	bulkEncryptOpts := protect.EncryptBulkOptions{
 		Plaintexts: []protect.PlaintextPayload{
 			{
@@ -112,11 +171,11 @@ func main() {
 
 	fmt.Printf("Bulk encrypted %d items\n", len(bulkEncrypted))
 
-	// Example 4: Bulk decryption
+	// Example 8: Bulk decryption (pass *Encrypted values)
 	ciphertexts := make([]protect.BulkDecryptPayload, len(bulkEncrypted))
-	for i, enc := range bulkEncrypted {
+	for i := range bulkEncrypted {
 		ciphertexts[i] = protect.BulkDecryptPayload{
-			Ciphertext: *enc.Ciphertext,
+			Ciphertext: &bulkEncrypted[i],
 		}
 	}
 
@@ -131,7 +190,7 @@ func main() {
 
 	fmt.Printf("Bulk decrypted values: %v\n", bulkPlaintexts)
 
-	// Example 5: Bulk decryption with fallible results
+	// Example 9: Bulk decryption with fallible results
 	fallibleResults, err := client.DecryptBulkFallible(bulkDecryptOpts)
 	if err != nil {
 		log.Fatalf("Failed to bulk decrypt fallible: %v", err)
@@ -139,11 +198,36 @@ func main() {
 
 	for i, result := range fallibleResults {
 		if result.Data != nil {
-			fmt.Printf("Result %d: %s\n", i, *result.Data)
+			fmt.Printf("Result %d: %v\n", i, result.Data)
 		} else {
 			fmt.Printf("Result %d: Error - %s\n", i, *result.Error)
 		}
 	}
+
+	// Example 10: Bulk query encryption
+	bulkQueryOpts := protect.EncryptQueryBulkOptions{
+		Queries: []protect.QueryPayload{
+			{
+				Plaintext: "alice",
+				Column:    "name",
+				Table:     "users",
+				IndexType: protect.IndexTypeMatch,
+			},
+			{
+				Plaintext: "bob",
+				Column:    "name",
+				Table:     "users",
+				IndexType: protect.IndexTypeMatch,
+			},
+		},
+	}
+
+	bulkQueryEncrypted, err := client.EncryptQueryBulk(bulkQueryOpts)
+	if err != nil {
+		log.Fatalf("Failed to bulk encrypt queries: %v", err)
+	}
+
+	fmt.Printf("Bulk encrypted %d queries\n", len(bulkQueryEncrypted))
 }
 
 func ptr[T any](v T) *T {
