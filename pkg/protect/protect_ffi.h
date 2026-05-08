@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Opaque client handle passed across the FFI boundary.
+ */
 typedef struct Client Client;
 
 typedef struct CResult {
@@ -24,9 +27,16 @@ typedef struct CResult {
 
  struct CResult protect_encrypt(const struct Client *client_ptr, const char *options_json) ;
 
- struct CResult protect_decrypt(const struct Client *client_ptr, const char *options_json) ;
-
  struct CResult protect_encrypt_bulk(const struct Client *client_ptr, const char *options_json) ;
+
+ struct CResult protect_encrypt_query(const struct Client *client_ptr, const char *options_json) ;
+
+
+struct CResult protect_encrypt_query_bulk(const struct Client *client_ptr,
+                                          const char *options_json)
+;
+
+ struct CResult protect_decrypt(const struct Client *client_ptr, const char *options_json) ;
 
  struct CResult protect_decrypt_bulk(const struct Client *client_ptr, const char *options_json) ;
 
@@ -34,6 +44,11 @@ typedef struct CResult {
 struct CResult protect_decrypt_bulk_fallible(const struct Client *client_ptr,
                                              const char *options_json)
 ;
+
+/**
+ * Check if a JSON value is a valid EQL ciphertext.
+ */
+ bool protect_is_encrypted(const char *value_json) ;
 
  void protect_free_client(const struct Client *client_ptr) ;
 

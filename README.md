@@ -1,7 +1,7 @@
 <h1 align="center">
   <img alt="CipherStash Logo" loading="lazy" width="128" height="128" decoding="async" data-nimg="1"   style="color:transparent" src="https://cipherstash.com/assets/cs-github.png">
   </br>
-  Protect.go
+  CipherStash Go Encryption SDK
 </h1>
 <p align="center">
   Implement robust data security without sacrificing performance or usability
@@ -29,137 +29,12 @@
 > This is a work in progress.
 > The package is not yet available on pkg.go.dev.
 
-Protect.go is a Go module for encrypting and decrypting data. Encryption operations happen directly in your app, and the ciphertext is stored in your database. Every value you encrypt with Protect.go has a unique key, made possible by CipherStash [ZeroKMS](https://cipherstash.com/products/zerokms)'s blazing fast bulk key operations, and backed by a root key in [AWS KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html). The encrypted data is structured as an [EQL](https://github.com/cipherstash/encrypt-query-language) JSON payload, and can be stored in any database that supports JSONB.
+The CipherStash Go Encryption SDK encrypts, decrypts, and searches encrypted data. Every value you encrypt has a unique key, made possible by CipherStash [ZeroKMS](https://cipherstash.com/products/zerokms)'s bulk key operations, backed by a root key in [AWS KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html). The encrypted data is stored as a JSON payload in any database that supports JSONB.
 
 > [!IMPORTANT]  
-> Searching, sorting, and filtering on encrypted data is currently only supported when storing encrypted data in PostgreSQL.
+> Searching, sorting, and filtering on encrypted data requires PostgreSQL.
 
-## Table of contents
-
-- [Features](#features)
-- [Prebuilt Libraries](#prebuilt-libraries)
-- [Installing Protect.go](#installing-protectgo)
-- [Getting started](#getting-started)
-- [Basic usage](#basic-usage)
-- [Configuration](#configuration)
-- [Identity-aware encryption](#identity-aware-encryption)
-- [Supported data types](#supported-data-types)
-- [Searchable encryption](#searchable-encryption)
-- [API Reference](#api-reference)
-- [Building from source](#building-from-source)
-- [Example applications](#example-applications)
-- [Contributing](#contributing)
-- [License](#license)
-
-For more specific documentation, refer to the [docs](./docs).
-
-## Features
-
-Protect.go protects data using industry-standard AES encryption. Protect.go uses [ZeroKMS](https://cipherstash.com/products/zerokms) for bulk encryption and decryption operations. This enables every encrypted value, in every column, in every row in your database to have a unique key — without sacrificing performance.
-
-**Features:**
-
-- **Bulk encryption and decryption**: Protect.go uses [ZeroKMS](https://cipherstash.com/products/zerokms) for encrypting and decrypting thousands of records at once, while using a unique key for every value.
-- **Single item encryption and decryption**: Just looking for a way to encrypt and decrypt single values? Protect.go has you covered.
-- **Really fast**: ZeroKMS's performance makes using millions of unique keys feasible and performant for real-world applications built with Protect.go.
-- **Identity-aware encryption**: Lock down access to sensitive data by requiring a valid JWT to perform a decryption.
-- **Audit trail**: Every decryption event will be logged in ZeroKMS to help you prove compliance.
-- **Searchable encryption**: Protect.go supports searching encrypted data in PostgreSQL.
-- **Type safety**: Strong typing with Go structs and interfaces.
-
-**Use cases:**
-
-- **Trusted data access**: make sure only your end-users can access their sensitive data stored in your product.
-- **Meet compliance requirements faster**: meet and exceed the data encryption requirements of SOC2 and ISO27001.
-- **Reduce the blast radius of data breaches**: limit the impact of exploited vulnerabilities to only the data your end-users can decrypt.
-
-## Prebuilt Libraries
-
-Protect.go uses prebuilt static libraries to provide native cryptographic functionality across different platforms. The core encryption and decryption operations are implemented in Rust and compiled into platform-specific static libraries that are embedded directly into the Go package.
-
-### What libraries are prebuilt
-
-The following static libraries are prebuilt and included in the Go package:
-
-- **macOS ARM64**: `libprotect_ffi_darwin_arm64.a`
-- **macOS Intel**: `libprotect_ffi_darwin_x64.a`  
-- **Linux ARM64**: `libprotect_ffi_linux_arm64.a`
-- **Linux x64**: `libprotect_ffi_linux_x64.a`
-- **Linux ARM64 (musl)**: `libprotect_ffi_linux_arm64_musl.a`
-- **Linux x64 (musl)**: `libprotect_ffi_linux_x64_musl.a`
-
-These libraries contain the compiled Rust code from the `protect-ffi-c` crate, which provides C-compatible FFI bindings for the CipherStash client functionality.
-
-### How the libraries work
-
-1. **Rust Implementation**: Core encryption logic is implemented in Rust in the `crates/protect-ffi-c` directory
-2. **C FFI Layer**: The Rust code exports C-compatible functions using FFI (Foreign Function Interface)
-3. **Header Generation**: C headers are automatically generated using `cbindgen` during the build process
-4. **Static Linking**: The Go package uses CGO to statically link against the appropriate prebuilt library for your platform
-5. **Platform Selection**: The correct library is automatically selected at build time based on your OS and architecture
-
-This approach ensures that Protect.go can leverage high-performance Rust cryptographic implementations while providing a native Go API, without requiring users to install Rust or compile anything themselves.
-
-## Installing Protect.go
-
-### Prerequisites
-
-- Go 1.21 or later
-- CipherStash CLI (for configuration)
-
-### Install the Go package
-
-```bash
-go get github.com/cipherstash/protectgo/pkg/protect
-```
-
-### Install the CipherStash CLI
-
-- On macOS:
-  ```bash
-  brew install cipherstash/tap/stash
-  ```
-
-- On Linux, download the binary for your platform, and put it on your `PATH`:
-  - [Linux ARM64](https://github.com/cipherstash/cli-releases/releases/latest/download/stash-aarch64-unknown-linux-gnu)
-  - [Linux x86_64](https://github.com/cipherstash/cli-releases/releases/latest/download/stash-x86_64-unknown-linux-gnu)
-
-## Getting started
-
-### Configuration
-
-> [!IMPORTANT]  
-> Make sure you have [installed the CipherStash CLI](#installing-protectgo) before following these steps.
-
-To set up all the configuration and credentials required for Protect.go:
-
-```bash
-stash setup
-```
-
-If you haven't already signed up for a CipherStash account, this will prompt you to do so along the way.
-
-At the end of `stash setup`, you will have two files in your project:
-
-- `cipherstash.toml` which contains the configuration for Protect.go
-- `cipherstash.secret.toml`: which contains the credentials for Protect.go
-
-> [!WARNING]  
-> Don't commit `cipherstash.secret.toml` to git; it contains sensitive credentials.  
-> The `stash setup` command will attempt to append to your `.gitignore` file with the `cipherstash.secret.toml` file.
-
-### Environment Variables
-
-The library respects the following environment variables:
-
-- `CIPHERSTASH_WORKSPACE_CRN` - Workspace CRN
-- `CIPHERSTASH_ACCESS_KEY` - Access key
-- `CIPHERSTASH_CLIENT_ID` - Client ID  
-- `CIPHERSTASH_CLIENT_KEY` - Client key
-
-## Basic usage
-
-### Simple encryption and decryption
+## Quick start
 
 ```go
 package main
@@ -167,273 +42,378 @@ package main
 import (
     "context"
     "log"
-    
+
     "github.com/cipherstash/protectgo/pkg/protect"
 )
 
+// Define your model. The `cs` tag marks fields for encryption.
+type User struct {
+    ID    int    `json:"id"`
+    Email string `json:"email" cs:"email,unique(downcase),match"`
+    Name  string `json:"name"  cs:"name,match"`
+    Age   int    `json:"age"   cs:"age,cast=number,ore"`
+    Role  string `json:"role"`
+}
+
 func main() {
-    // Configure encryption settings
-    config := protect.EncryptConfig{
-        Version: 1,
-        Tables: protect.Tables{
-            "users": protect.Table{
-                "email": protect.Column{
-                    CastAs: &protect.CastAsText,
-                    Indexes: &protect.Indexes{
-                        UniqueIndex: &protect.UniqueIndexOpts{
-                            TokenFilters: []protect.TokenFilter{
-                                {Kind: "downcase"},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
+    ctx := context.Background()
 
-    // Create client
-    client, err := protect.NewClient(protect.NewClientOptions{
-        EncryptConfig: config,
-    })
+    // Build schema from struct tags
+    users, _ := protect.TableSchema("users", User{})
+
+    // Create client — credentials from env vars or config files
+    client, err := protect.NewClient(ctx, protect.WithSchemas(users))
     if err != nil {
         log.Fatal(err)
     }
-    defer client.Free()
+    defer client.Close()
 
-    // Encrypt data
-    encrypted, err := client.Encrypt(protect.EncryptOptions{
-        Plaintext: "john.doe@example.com",
-        Table:     "users",
-        Column:    "email",
-    })
+    // Encrypt a model
+    user := User{ID: 1, Email: "john@example.com", Name: "John", Age: 30, Role: "admin"}
+    encrypted, err := client.EncryptModel(ctx, users, user)
     if err != nil {
         log.Fatal(err)
     }
 
-    log.Printf("Encrypted: %s", *encrypted.Ciphertext)
-
-    // Decrypt data
-    plaintext, err := client.Decrypt(protect.DecryptOptions{
-        Ciphertext: *encrypted.Ciphertext,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    log.Printf("Decrypted: %s", plaintext)
+    // Decrypt back to struct
+    var decrypted User
+    client.DecryptModel(ctx, users, encrypted, &decrypted)
+    log.Printf("%s <%s>", decrypted.Name, decrypted.Email)
 }
 ```
 
-### Bulk operations
+## Installing
 
-```go
-// Bulk encryption
-bulkEncrypted, err := client.EncryptBulk(protect.EncryptBulkOptions{
-    Plaintexts: []protect.PlaintextPayload{
-        {
-            Plaintext: "alice@example.com",
-            Table:     "users",
-            Column:    "email",
-        },
-        {
-            Plaintext: "bob@example.com", 
-            Table:     "users",
-            Column:    "email",
-        },
-    },
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-// Bulk decryption
-ciphertexts := make([]protect.BulkDecryptPayload, len(bulkEncrypted))
-for i, enc := range bulkEncrypted {
-    ciphertexts[i] = protect.BulkDecryptPayload{
-        Ciphertext: *enc.Ciphertext,
-    }
-}
-
-plaintexts, err := client.DecryptBulk(protect.DecryptBulkOptions{
-    Ciphertexts: ciphertexts,
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-log.Printf("Decrypted values: %v", plaintexts)
+```bash
+go get github.com/cipherstash/protectgo/pkg/protect
 ```
 
-## Configuration
+### CipherStash CLI
 
-### Encryption Configuration
+```bash
+# macOS
+brew install cipherstash/tap/stash
 
-```go
-type EncryptConfig struct {
-    Version uint32 `json:"v"`
-    Tables  Tables `json:"tables"`
-}
-
-type Tables map[string]Table
-type Table map[string]Column
-
-type Column struct {
-    CastAs  *CastAs  `json:"cast_as,omitempty"`
-    Indexes *Indexes `json:"indexes,omitempty"`
-}
+# Then set up credentials
+stash setup
 ```
 
-### Client Configuration
+This creates `cipherstash.toml` and `cipherstash.secret.toml` in your project.
+
+> [!WARNING]  
+> Don't commit `cipherstash.secret.toml` to git.
+
+You can also use environment variables:
+
+| Variable | Description |
+|---|---|
+| `CS_WORKSPACE_CRN` | Workspace CRN |
+| `CS_CLIENT_ACCESS_KEY` | Access key |
+| `CS_CLIENT_ID` | Client ID |
+| `CS_CLIENT_KEY` | Client key |
+
+## Defining your schema
+
+### Struct tags
+
+The `cs` tag defines the encryption schema directly on your Go structs:
 
 ```go
-type ClientOpts struct {
-    WorkspaceCrn *string `json:"workspaceCrn,omitempty"`
-    AccessKey    *string `json:"accessKey,omitempty"`
-    ClientID     *string `json:"clientId,omitempty"`
-    ClientKey    *string `json:"clientKey,omitempty"`
+type User struct {
+    ID       int    `json:"id"`                                          // not encrypted
+    Email    string `json:"email" cs:"email,unique(downcase),match"`     // exact match + full-text
+    Name     string `json:"name"  cs:"name,match"`                      // full-text search
+    Age      int    `json:"age"   cs:"age,cast=number,ore"`             // range queries
+    Metadata any    `json:"metadata" cs:"metadata,ste_vec(prefix=u/m)"` // JSON queries
+    Role     string `json:"role"`                                        // not encrypted
 }
+
+users, err := protect.TableSchema("users", User{})
 ```
 
-### Index Types
+#### Index directives
 
-The library supports all the same index types as other Protect libraries:
+| Directive | Description |
+|---|---|
+| `unique` | Exact match queries (`WHERE email = ?`) |
+| `unique(downcase)` | Case-insensitive exact match |
+| `match` | Full-text search (ngram tokenizer, k=6, m=2048) |
+| `match(tokenizer=standard)` | Full-text with word-boundary tokenizer |
+| `ore` | Range queries (`<`, `>`, `BETWEEN`, `ORDER BY`) |
+| `ste_vec(prefix=t/c)` | JSON path and containment queries |
 
-- **ORE Index**: For range queries and ordering
-- **Match Index**: For full-text search  
-- **Unique Index**: For exact matching and uniqueness constraints
-- **SteVec Index**: For vector similarity searches
+#### Type inference
 
-### Data Types
+Cast type is inferred from the Go field type. Override with `cast=<type>`:
 
-Supported cast types:
-- `CastAsText` - UTF-8 strings
-- `CastAsInt` - 32-bit integers
-- `CastAsBigInt` - 64-bit integers
-- `CastAsBoolean` - Boolean values
-- `CastAsDate` - Date values
-- `CastAsReal/CastAsDouble` - Floating point numbers
-- `CastAsJsonB` - JSON data
+| Go type | Inferred cast | Override example |
+|---|---|---|
+| `string` | `string` | `cast=text` |
+| `int`, `float64` | `number` | `cast=bigint` |
+| `bool` | `boolean` | |
+| `map`, `any`, `[]T` | `json` | |
 
-## Identity-aware encryption
+### Programmatic builder
 
-> [!IMPORTANT]  
-> Identity-aware encryption requires implementing JWT validation in your application.
-
-Protect.go can add an additional layer of protection to your data by requiring a valid JWT to perform a decryption. This ensures that only the user who encrypted data is able to decrypt it.
-
-### Using Lock Context
+For complex schemas or when you prefer type safety over struct tags:
 
 ```go
-// Create lock context from JWT claims
-lockContext := protect.LockContext{
-    IdentityClaim: []string{"user:12345"}, // Extract from JWT
+users := protect.NewSchema("users").
+    Column("email", protect.CastAsString).Equality().FreeTextSearch().Done().
+    Column("name", protect.CastAsString).FreeTextSearch().Done().
+    Column("age", protect.CastAsNumber).OrderAndRange().Done().
+    Column("profile", protect.CastAsJson).SearchableJSON("users/profile").Done().
+    Build()
+```
+
+### Multiple tables
+
+```go
+client, err := protect.NewClient(ctx,
+    protect.WithSchemas(users, orders, products),
+)
+```
+
+## Creating a client
+
+```go
+// Minimal — credentials from env vars or config files
+client, err := protect.NewClient(ctx, protect.WithSchemas(users))
+
+// Explicit credentials
+client, err := protect.NewClient(ctx,
+    protect.WithSchemas(users),
+    protect.WithCredentials(crn, accessKey, clientID, clientKey),
+)
+
+// Multi-tenant keyset isolation
+client, err := protect.NewClient(ctx,
+    protect.WithSchemas(users),
+    protect.WithKeyset("tenant-a"),
+)
+
+defer client.Close()
+```
+
+## Encrypting and decrypting
+
+### Models
+
+The fastest way to encrypt data. Fields with a `cs` tag are encrypted; everything else passes through.
+
+```go
+user := User{ID: 1, Email: "alice@example.com", Name: "Alice", Age: 28, Role: "admin"}
+
+// Encrypt — returns map with *Encrypted values for tagged fields
+encrypted, err := client.EncryptModel(ctx, users, user)
+
+// Decrypt — populates struct from encrypted map
+var decrypted User
+err = client.DecryptModel(ctx, users, encrypted, &decrypted)
+```
+
+### Bulk models
+
+Single KMS call for all fields across all models:
+
+```go
+encryptedModels, err := client.BulkEncryptModels(ctx, users, userSlice)
+
+var decryptedUsers []User
+err = client.BulkDecryptModels(ctx, users, encryptedModels, &decryptedUsers)
+```
+
+### Single values
+
+Column references come from the schema — no string arguments:
+
+```go
+encrypted, err := client.Encrypt(ctx, users.Column("email"), "alice@example.com")
+plaintext, err := client.Decrypt(ctx, encrypted)
+```
+
+### Bulk values
+
+```go
+items := []protect.PlaintextItem{
+    {Column: users.Column("email"), Plaintext: "alice@example.com"},
+    {Column: users.Column("email"), Plaintext: "bob@example.com"},
 }
+encrypted, err := client.EncryptBulk(ctx, items)
+```
 
-// Encrypt with lock context
-encrypted, err := client.Encrypt(protect.EncryptOptions{
-    Plaintext:   "sensitive-data",
-    Table:       "users",
-    Column:      "email",
-    LockContext: &lockContext,
-})
+### With options
 
-// Decrypt with the same lock context
-plaintext, err := client.Decrypt(protect.DecryptOptions{
-    Ciphertext:  *encrypted.Ciphertext,
-    LockContext: &lockContext,
-})
+```go
+lc := &protect.LockContext{IdentityClaim: []string{"user:123"}}
+
+encrypted, err := client.Encrypt(ctx, users.Column("email"), "alice@example.com",
+    protect.WithLockContext(lc),
+)
+
+plaintext, err := client.Decrypt(ctx, encrypted,
+    protect.WithLockContext(lc),
+)
 ```
 
 > [!CAUTION]  
-> You must use the same lock context to encrypt and decrypt data.  
-> If you use different lock contexts, you will be unable to decrypt the data.
+> Data encrypted with a lock context can only be decrypted with the same context.
 
-## Supported data types
+## Querying encrypted data
 
-Protect.go currently supports encrypting and decrypting text. Other data types like booleans, dates, ints, floats, and JSON are well-supported in other CipherStash products, and will be coming to Protect.go soon.
-
-## Searchable encryption
-
-> [!IMPORTANT]  
-> Searchable encryption requires PostgreSQL with EQL extensions installed.
-
-To enable searchable encryption, you need to install EQL in your PostgreSQL database:
-
-1. Download the latest EQL install script:
-   ```bash
-   curl -sLo cipherstash-encrypt.sql \
-     https://github.com/cipherstash/encrypt-query-language/releases/latest/download/cipherstash-encrypt.sql
-   ```
-
-2. Run this command to install the custom types and functions:
-   ```bash
-   psql -f cipherstash-encrypt.sql
-   ```
-
-3. Create tables with the `eql_v2_encrypted` type:
-   ```sql
-   CREATE TABLE users (
-       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-       email eql_v2_encrypted
-   );
-   ```
-
-Read more about [searching encrypted data](./docs/concepts/searchable-encryption.md) in the docs.
-
-## API Reference
-
-### Client Methods
-
-- `NewClient(options NewClientOptions) (*Client, error)` - Create a new client
-- `client.Free()` - Release client resources
-- `client.Encrypt(options EncryptOptions) (*Encrypted, error)` - Encrypt single value
-- `client.EncryptBulk(options EncryptBulkOptions) ([]Encrypted, error)` - Encrypt multiple values
-- `client.Decrypt(options DecryptOptions) (string, error)` - Decrypt single value  
-- `client.DecryptBulk(options DecryptBulkOptions) ([]string, error)` - Decrypt multiple values
-- `client.DecryptBulkFallible(options DecryptBulkOptions) ([]DecryptResult, error)` - Decrypt with error handling per item
-
-### Error Handling
-
-All operations return Go-style errors. Use standard Go error handling patterns:
+Encrypt search terms to query encrypted columns without exposing plaintext:
 
 ```go
-if err != nil {
-    // Handle error
-    log.Printf("Encryption failed: %v", err)
-    return err
+// Exact match
+query, _ := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "alice@example.com")
+// Use query.UniqueIndex in SQL
+
+// Full-text search
+query, _ := client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "alice")
+// Use query.MatchIndex in SQL
+
+// Range comparison
+query, _ := client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
+// Use query.OreIndex in SQL
+
+// JSON containment
+query, _ := client.EncryptQuery(ctx, users.Column("metadata"), protect.JSONContains, map[string]any{"role": "admin"})
+
+// Bulk queries
+queries, _ := client.EncryptQueryBulk(ctx, []protect.QueryItem{
+    {Column: users.Column("email"), QueryType: protect.Equality, Plaintext: "alice@example.com"},
+    {Column: users.Column("name"), QueryType: protect.FreeTextSearch, Plaintext: "bob"},
+})
+```
+
+| Query Type | Use Case |
+|---|---|
+| `protect.Equality` | Exact match (`=`) |
+| `protect.FreeTextSearch` | Substring/fuzzy search |
+| `protect.OrderAndRange` | Range comparisons, sorting |
+| `protect.JSONSelector` | JSON path queries (`$.field`) |
+| `protect.JSONContains` | JSON containment (`@>`) |
+
+## Error handling
+
+All errors support `errors.Is()` for programmatic handling:
+
+```go
+_, err := client.Encrypt(ctx, users.Column("email"), "value")
+
+if errors.Is(err, protect.ErrUnknownColumn) {
+    // column not in schema
+}
+if errors.Is(err, protect.ErrMissingIndex) {
+    // index not configured for this query type
+}
+if errors.Is(err, protect.ErrClientClosed) {
+    // client was already closed
 }
 ```
 
-## Running the basic usage example
+| Sentinel | Description |
+|---|---|
+| `ErrUnknownColumn` | Column not found in encryption schema |
+| `ErrMissingIndex` | Required index not configured |
+| `ErrInvalidQueryInput` | Wrong value type for query operation |
+| `ErrInvalidJSONPath` | Invalid JSON path for selector query |
+| `ErrClientClosed` | Client has been closed |
 
-### Running with glibc (default)
+## API reference
 
-For most Linux distributions that use glibc:
+### Schema
+
+```go
+func TableSchema(tableName string, model any) (*TableDef, error)
+func NewSchema(tableName string) *SchemaBuilder
+func (td *TableDef) Column(name string) ColumnRef
+func (td *TableDef) Name() string
+```
+
+### Client
+
+```go
+func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error)
+func (c *Client) Close() error
+
+// Options
+func WithSchemas(schemas ...*TableDef) ClientOption
+func WithCredentials(workspaceCRN, accessKey, clientID, clientKey string) ClientOption
+func WithKeyset(name string) ClientOption
+```
+
+### Operations
+
+```go
+func (c *Client) Encrypt(ctx, col, plaintext, ...Option) (*Encrypted, error)
+func (c *Client) Decrypt(ctx, encrypted, ...Option) (any, error)
+func (c *Client) EncryptBulk(ctx, items, ...Option) ([]Encrypted, error)
+func (c *Client) DecryptBulk(ctx, items, ...Option) ([]any, error)
+func (c *Client) DecryptBulkFallible(ctx, items, ...Option) ([]DecryptResult, error)
+func (c *Client) EncryptQuery(ctx, col, queryType, plaintext, ...Option) (*Encrypted, error)
+func (c *Client) EncryptQueryBulk(ctx, queries, ...Option) ([]Encrypted, error)
+
+// Options
+func WithLockContext(lc *LockContext) Option
+func WithServiceToken(token string) Option
+func WithAuditContext(ctx any) Option
+```
+
+### Models
+
+```go
+func (c *Client) EncryptModel(ctx, schema, model) (map[string]any, error)
+func (c *Client) DecryptModel(ctx, schema, data, dest) error
+func (c *Client) BulkEncryptModels(ctx, schema, models) ([]map[string]any, error)
+func (c *Client) BulkDecryptModels(ctx, schema, data, dest) error
+```
+
+### Utilities
+
+```go
+func IsEncrypted(value any) bool
+```
+
+## PostgreSQL setup
+
+Searchable encryption requires the EQL extension:
+
+```bash
+curl -sLo cipherstash-encrypt.sql \
+  https://github.com/cipherstash/encrypt-query-language/releases/latest/download/cipherstash-encrypt.sql
+psql -f cipherstash-encrypt.sql
+```
+
+```sql
+CREATE TABLE users (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email eql_v2_encrypted
+);
+```
+
+## Prebuilt libraries
+
+The SDK ships with precompiled static libraries for all supported platforms. No Rust toolchain required.
+
+| Platform | Library |
+|---|---|
+| macOS ARM64 | `libprotect_ffi_darwin_arm64.a` |
+| macOS Intel | `libprotect_ffi_darwin_x64.a` |
+| Linux ARM64 | `libprotect_ffi_linux_arm64.a` |
+| Linux x64 | `libprotect_ffi_linux_x64.a` |
+| Linux ARM64 (musl) | `libprotect_ffi_linux_arm64_musl.a` |
+| Linux x64 (musl) | `libprotect_ffi_linux_x64_musl.a` |
+
+## Running the examples
 
 ```bash
 go run examples/basic_usage.go
-```
 
-### Running with musl (Alpine Linux)
-
-For Alpine Linux or musl-based systems:
-
-```bash
+# Alpine Linux / musl
 go run -tags=musl examples/basic_usage.go
 ```
 
-### Building a static binary with musl
+---
 
-To create a completely static binary of the example:
-
-```bash
-# Build static Go binary
-CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -tags=musl examples/basic_usage.go
-
-# Run the static binary
-./basic_usage_static
-```
-
-### Didn't find what you wanted?
-
-[Click here to let us know what was missing from our docs.](https://github.com/cipherstash/protectgo/issues/new?template=docs-feedback.yml&title=[Docs:]%20Feedback%20on%20README.md) 
+[Missing something?](https://github.com/cipherstash/protectgo/issues/new?template=docs-feedback.yml&title=[Docs:]%20Feedback%20on%20README.md)

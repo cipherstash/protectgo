@@ -1,6 +1,6 @@
 use super::Error;
 use cipherstash_client::schema::{
-    column::{Index, IndexType, TokenFilter, Tokenizer},
+    column::{ArrayIndexMode, Index, IndexType, TokenFilter, Tokenizer},
     ColumnConfig, ColumnType,
 };
 use serde::{Deserialize, Serialize};
@@ -66,19 +66,16 @@ pub struct Column {
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum CastAs {
     BigInt,
     Boolean,
     Date,
-    Real,
-    Double,
-    Int,
-    SmallInt,
+    Number,
     #[default]
+    String,
     Text,
-    #[serde(rename = "jsonb")]
-    JsonB,
+    Json,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
@@ -113,6 +110,10 @@ pub struct MatchIndexOpts {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SteVecIndexOpts {
     prefix: String,
+    #[serde(default)]
+    term_filters: Vec<TokenFilter>,
+    #[serde(default)]
+    array_index_mode: ArrayIndexMode,
 }
 
 fn default_tokenizer() -> Tokenizer {
@@ -137,13 +138,12 @@ impl From<CastAs> for ColumnType {
     fn from(value: CastAs) -> Self {
         match value {
             CastAs::BigInt => ColumnType::BigInt,
-            CastAs::SmallInt => ColumnType::SmallInt,
-            CastAs::Int => ColumnType::Int,
             CastAs::Boolean => ColumnType::Boolean,
             CastAs::Date => ColumnType::Date,
-            CastAs::Real | CastAs::Double => ColumnType::Float,
+            CastAs::Number => ColumnType::Float,
+            CastAs::String => ColumnType::Utf8Str,
             CastAs::Text => ColumnType::Utf8Str,
-            CastAs::JsonB => ColumnType::JsonB,
+            CastAs::Json => ColumnType::JsonB,
         }
     }
 }
@@ -158,22 +158,35 @@ impl FromStr for EncryptConfig {
 }
 
 impl EncryptConfig {
-    pub fn into_config_map(self) -> HashMap<Identifier, ColumnConfig> {
+    pub fn into_config_map(self) -> Result<HashMap<Identifier, ColumnConfig>, super::Error> {
         let mut map = HashMap::new();
         for (table_name, columns) in self.tables.into_iter() {
             for (column_name, column) in columns.into_iter() {
-                let column_config = column.into_column_config(&column_name);
+                let column_config = column.into_column_config(&table_name, &column_name)?;
                 let key = Identifier::new(&table_name, &column_name);
                 map.insert(key, column_config);
             }
         }
-        map
+        Ok(map)
     }
 }
 
 impl Column {
-    pub fn into_column_config(self, name: &String) -> ColumnConfig {
-        let mut config = ColumnConfig::build(name.to_string()).casts_as(self.cast_as.into());
+    pub fn into_column_config(
+        self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<ColumnConfig, super::Error> {
+        // Validate ste_vec requires cast_as: json
+        if self.indexes.ste_vec_index.is_some() && self.cast_as != CastAs::Json {
+            return Err(super::Error::SteVecRequiresJsonCastAs {
+                table: table_name.to_string(),
+                column: column_name.to_string(),
+                found_cast_as: cast_as_name(&self.cast_as).to_string(),
+            });
+        }
+
+        let mut config = ColumnConfig::build(column_name.to_string()).casts_as(self.cast_as.into());
 
         if self.indexes.ore_index.is_some() {
             config = config.add_index(Index::new_ore());
@@ -195,11 +208,33 @@ impl Column {
             }))
         }
 
-        if let Some(SteVecIndexOpts { prefix }) = self.indexes.ste_vec_index {
-            config = config.add_index(Index::new(IndexType::SteVec { prefix }))
+        if let Some(SteVecIndexOpts {
+            prefix,
+            term_filters,
+            array_index_mode,
+        }) = self.indexes.ste_vec_index
+        {
+            config = config.add_index(Index::new(IndexType::SteVec {
+                prefix,
+                term_filters,
+                array_index_mode,
+            }))
         }
 
-        config
+        Ok(config)
+    }
+}
+
+/// Get a human-readable name for CastAs value
+fn cast_as_name(cast_as: &CastAs) -> &'static str {
+    match cast_as {
+        CastAs::BigInt => "bigint",
+        CastAs::Boolean => "boolean",
+        CastAs::Date => "date",
+        CastAs::Number => "number",
+        CastAs::String => "string",
+        CastAs::Text => "text",
+        CastAs::Json => "json",
     }
 }
 
@@ -211,7 +246,8 @@ mod tests {
 
     fn parse(json: serde_json::Value) -> HashMap<Identifier, ColumnConfig> {
         serde_json::from_value::<EncryptConfig>(json)
-            .map(|config| config.into_config_map())
+            .unwrap()
+            .into_config_map()
             .unwrap()
     }
 
@@ -243,7 +279,7 @@ mod tests {
             "tables": {
                 "users": {
                     "favourite_int": {
-                        "cast_as": "int"
+                        "cast_as": "number"
                     }
                 }
             }
@@ -255,7 +291,7 @@ mod tests {
 
         let column = encrypt_config.get(&ident).expect("column exists");
 
-        assert_eq!(column.cast_type, ColumnType::Int);
+        assert_eq!(column.cast_type, ColumnType::Float);
         assert_eq!(column.name, "favourite_int");
         assert!(column.indexes.is_empty());
     }
@@ -456,6 +492,7 @@ mod tests {
             "tables": {
                 "users": {
                     "event_data": {
+                        "cast_as": "json",
                         "indexes": {
                             "ste_vec": {
                                 "prefix": "event-data"
@@ -472,11 +509,89 @@ mod tests {
 
         let column = encrypt_config.get(&ident).expect("column exists");
 
+        assert_eq!(column.cast_type, ColumnType::JsonB);
         assert_eq!(
             column.indexes[0].index_type,
             IndexType::SteVec {
-                prefix: "event-data".into()
+                prefix: "event-data".into(),
+                term_filters: vec![],
+                array_index_mode: Default::default(),
             },
         );
+    }
+
+    #[test]
+    fn ste_vec_with_non_json_cast_as_fails_validation() {
+        let json = json!({
+            "v": 1,
+            "tables": {
+                "users": {
+                    "event_data": {
+                        "cast_as": "string",
+                        "indexes": {
+                            "ste_vec": {
+                                "prefix": "event-data"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let result = serde_json::from_value::<EncryptConfig>(json)
+            .unwrap()
+            .into_config_map();
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("users"),
+            "Error should mention table name: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("event_data"),
+            "Error should mention column name: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("ste_vec"),
+            "Error should mention ste_vec index: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("json"),
+            "Error should mention json cast_as requirement: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn ste_vec_with_json_cast_as_succeeds() {
+        let json = json!({
+            "v": 1,
+            "tables": {
+                "users": {
+                    "event_data": {
+                        "cast_as": "json",
+                        "indexes": {
+                            "ste_vec": {
+                                "prefix": "event-data"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let result = serde_json::from_value::<EncryptConfig>(json)
+            .unwrap()
+            .into_config_map();
+
+        assert!(result.is_ok(), "ste_vec with json cast_as should succeed");
+        let config = result.unwrap();
+        let ident = Identifier::new("users", "event_data");
+        let column = config.get(&ident).expect("column exists");
+        assert_eq!(column.cast_type, ColumnType::JsonB);
     }
 }
