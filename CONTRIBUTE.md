@@ -4,7 +4,7 @@
 
 Please use the GitHub issue tracker to report bugs, suggest features, or documentation improvements.
 
-[When filing an issue](https://github.com/cipherstash/protectgo/issues/new/choose), please check [existing open](https://github.com/cipherstash/protectgo/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc), or [recently closed](https://github.com/cipherstash/protectgo/issues?q=is%3Aissue+sort%3Aupdated-desc+is%3Aclosed), issues to make sure somebody else hasn't already reported the issue. Please try to include as much information as you can.
+[When filing an issue](https://github.com/cipherstash/goencryption/issues/new/choose), please check [existing open](https://github.com/cipherstash/goencryption/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc), or [recently closed](https://github.com/cipherstash/goencryption/issues?q=is%3Aissue+sort%3Aupdated-desc+is%3Aclosed), issues to make sure somebody else hasn't already reported the issue. Please try to include as much information as you can.
 
 ---
 

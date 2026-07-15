@@ -1,56 +1,56 @@
-package protect
+package encryption
 
 import (
 	"errors"
 	"strings"
 )
 
-// Sentinel errors returned by the protect SDK. Use errors.Is() to check
+// Sentinel errors returned by the encryption SDK. Use errors.Is() to check
 // for specific error conditions.
 var (
 	// ErrUnknownColumn indicates the column was not found in the encrypt config.
-	ErrUnknownColumn = errors.New("protect: unknown column")
+	ErrUnknownColumn = errors.New("encryption: unknown column")
 
 	// ErrMissingIndex indicates the column does not have the required index type.
-	ErrMissingIndex = errors.New("protect: missing index")
+	ErrMissingIndex = errors.New("encryption: missing index")
 
 	// ErrInvalidQueryInput indicates the query input value is invalid for the index type.
-	ErrInvalidQueryInput = errors.New("protect: invalid query input")
+	ErrInvalidQueryInput = errors.New("encryption: invalid query input")
 
 	// ErrInvalidJSONPath indicates an invalid JSON path was provided.
-	ErrInvalidJSONPath = errors.New("protect: invalid JSON path")
+	ErrInvalidJSONPath = errors.New("encryption: invalid JSON path")
 
 	// ErrUnknownQueryOp indicates an unknown query operation was requested.
-	ErrUnknownQueryOp = errors.New("protect: unknown query operation")
+	ErrUnknownQueryOp = errors.New("encryption: unknown query operation")
 
 	// ErrClientClosed indicates the client has already been closed.
-	ErrClientClosed = errors.New("protect: client is closed")
+	ErrClientClosed = errors.New("encryption: client is closed")
 
 	// ErrInvariantViolation indicates an internal invariant was violated.
-	ErrInvariantViolation = errors.New("protect: invariant violation")
+	ErrInvariantViolation = errors.New("encryption: invariant violation")
 
 	// ErrSteVecRequiresJSON indicates an ste_vec index requires a JSON cast type.
-	ErrSteVecRequiresJSON = errors.New("protect: ste_vec requires json cast type")
+	ErrSteVecRequiresJSON = errors.New("encryption: ste_vec requires json cast type")
 
 	// ErrUnsupportedFormat indicates the column's index configuration has no
 	// equivalent in the selected encrypted format. This typically means a
 	// column uses an index or cast type that the chosen ciphertext format
 	// (see [WithEncryptedFormat]) cannot represent.
-	ErrUnsupportedFormat = errors.New("protect: unsupported encrypted format for column")
+	ErrUnsupportedFormat = errors.New("encryption: unsupported encrypted format for column")
 
 	// ErrInvalidCiphertext indicates a value passed for decryption is not a
 	// valid ciphertext payload.
-	ErrInvalidCiphertext = errors.New("protect: invalid ciphertext")
+	ErrInvalidCiphertext = errors.New("encryption: invalid ciphertext")
 
 	// ErrAuthStrategy indicates a client authentication strategy is
 	// misconfigured — for example [WithOIDCFederation] was selected without a
 	// workspace CRN, or a token callback is required but was not supplied.
-	ErrAuthStrategy = errors.New("protect: auth strategy misconfigured")
+	ErrAuthStrategy = errors.New("encryption: auth strategy misconfigured")
 
 	// ErrFFI indicates an unclassified error from the FFI layer.
 	// Use errors.Is(err, ErrFFI) to check if an error originated from the
 	// underlying encryption engine when no more specific sentinel applies.
-	ErrFFI = errors.New("protect: FFI error")
+	ErrFFI = errors.New("encryption: FFI error")
 )
 
 // Error is a structured error from the encryption SDK.

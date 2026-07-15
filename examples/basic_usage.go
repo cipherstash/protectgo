@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/cipherstash/protectgo/pkg/protect"
+	"github.com/cipherstash/goencryption/pkg/encryption"
 )
 
 // User defines the data model with encryption schema using struct tags.
@@ -35,7 +35,7 @@ func main() {
 	// 1. Define schema from struct tags
 	// ---------------------------------------------------------------
 
-	users, err := protect.TableSchema("users", User{})
+	users, err := encryption.TableSchema("users", User{})
 	if err != nil {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
@@ -44,9 +44,9 @@ func main() {
 	// 2. Create client with functional options
 	// ---------------------------------------------------------------
 
-	client, err := protect.NewClient(ctx,
-		protect.WithSchemas(users),
-		protect.WithCredentials(
+	client, err := encryption.NewClient(ctx,
+		encryption.WithSchemas(users),
+		encryption.WithCredentials(
 			os.Getenv("CS_WORKSPACE_CRN"),
 			os.Getenv("CS_CLIENT_ACCESS_KEY"),
 			os.Getenv("CS_CLIENT_ID"),
@@ -69,10 +69,10 @@ func main() {
 	// service token and caches it until expiry. A workspace CRN is required,
 	// from WithCredentials or the CS_WORKSPACE_CRN environment variable.
 	//
-	//	client, err := protect.NewClient(ctx,
-	//	    protect.WithSchemas(users),
-	//	    protect.WithCredentials(crn, accessKey, clientID, clientKey),
-	//	    protect.WithOIDCFederation(func(ctx context.Context) (string, error) {
+	//	client, err := encryption.NewClient(ctx,
+	//	    encryption.WithSchemas(users),
+	//	    encryption.WithCredentials(crn, accessKey, clientID, clientKey),
+	//	    encryption.WithOIDCFederation(func(ctx context.Context) (string, error) {
 	//	        return identityProvider.AccessToken(ctx) // your app's IdP JWT
 	//	    }),
 	//	)
@@ -84,9 +84,9 @@ func main() {
 	// The default is EncryptedFormatV2. Select V3 only for databases
 	// initialized with the v3 CipherStash database schema:
 	//
-	//	client, err := protect.NewClient(ctx,
-	//	    protect.WithSchemas(users),
-	//	    protect.WithEncryptedFormat(protect.EncryptedFormatV3),
+	//	client, err := encryption.NewClient(ctx,
+	//	    encryption.WithSchemas(users),
+	//	    encryption.WithEncryptedFormat(encryption.EncryptedFormatV3),
 	//	)
 
 	// ---------------------------------------------------------------
@@ -175,13 +175,13 @@ func main() {
 	// 6. Query encryption (for searching encrypted columns)
 	// ---------------------------------------------------------------
 	//
-	// EncryptQuery returns an opaque *protect.QueryTerm. Treat it as a value to
+	// EncryptQuery returns an opaque *encryption.QueryTerm. Treat it as a value to
 	// bind into your SQL statement — do not inspect its shape. Depending on the
 	// column's index configuration it may serialize as a JSON object or a bare
 	// JSON string.
 
 	// Exact match query
-	queryTerm, err := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "john.doe@example.com")
+	queryTerm, err := client.EncryptQuery(ctx, users.Column("email"), encryption.Equality, "john.doe@example.com")
 	if err != nil {
 		log.Fatalf("Failed to encrypt query: %v", err)
 	}
@@ -189,7 +189,7 @@ func main() {
 	fmt.Printf("\nEncrypted equality query term: %s\n", queryTerm)
 
 	// Full-text search query
-	searchTerm, err := client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "john")
+	searchTerm, err := client.EncryptQuery(ctx, users.Column("name"), encryption.FreeTextSearch, "john")
 	if err != nil {
 		log.Fatalf("Failed to encrypt search query: %v", err)
 	}
@@ -197,7 +197,7 @@ func main() {
 	fmt.Printf("Encrypted match query term (%d bytes)\n", len(searchTerm.Bytes()))
 
 	// Range query
-	rangeTerm, err := client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
+	rangeTerm, err := client.EncryptQuery(ctx, users.Column("age"), encryption.OrderAndRange, 25)
 	if err != nil {
 		log.Fatalf("Failed to encrypt range query: %v", err)
 	}
@@ -210,9 +210,9 @@ func main() {
 	//       "SELECT * FROM users WHERE email = $1", queryTerm)
 
 	// Bulk query encryption
-	bulkQueries, err := client.EncryptQueryBulk(ctx, []protect.QueryItem{
-		{Column: users.Column("email"), QueryType: protect.Equality, Plaintext: "alice@example.com"},
-		{Column: users.Column("name"), QueryType: protect.FreeTextSearch, Plaintext: "bob"},
+	bulkQueries, err := client.EncryptQueryBulk(ctx, []encryption.QueryItem{
+		{Column: users.Column("email"), QueryType: encryption.Equality, Plaintext: "alice@example.com"},
+		{Column: users.Column("name"), QueryType: encryption.FreeTextSearch, Plaintext: "bob"},
 	})
 	if err != nil {
 		log.Fatalf("Failed to bulk encrypt queries: %v", err)
@@ -224,7 +224,7 @@ func main() {
 	// 7. Bulk encrypt and decrypt individual values
 	// ---------------------------------------------------------------
 
-	bulkEncrypted, err := client.EncryptBulk(ctx, []protect.PlaintextItem{
+	bulkEncrypted, err := client.EncryptBulk(ctx, []encryption.PlaintextItem{
 		{Column: users.Column("email"), Plaintext: "alice@example.com"},
 		{Column: users.Column("email"), Plaintext: "bob@example.com"},
 	})
@@ -232,7 +232,7 @@ func main() {
 		log.Fatalf("Failed to bulk encrypt: %v", err)
 	}
 
-	decryptItems := make([]*protect.Encrypted, len(bulkEncrypted))
+	decryptItems := make([]*encryption.Encrypted, len(bulkEncrypted))
 	for i := range bulkEncrypted {
 		decryptItems[i] = &bulkEncrypted[i]
 	}
@@ -265,8 +265,8 @@ func main() {
 	// 9. IsEncrypted validation
 	// ---------------------------------------------------------------
 
-	fmt.Printf("\nIsEncrypted(encrypted value): %v\n", protect.IsEncrypted(encrypted))
-	fmt.Printf("IsEncrypted(plain string):    %v\n", protect.IsEncrypted("not encrypted"))
+	fmt.Printf("\nIsEncrypted(encrypted value): %v\n", encryption.IsEncrypted(encrypted))
+	fmt.Printf("IsEncrypted(plain string):    %v\n", encryption.IsEncrypted("not encrypted"))
 
 	// ---------------------------------------------------------------
 	// 10. Identity-aware encryption
@@ -282,10 +282,10 @@ func main() {
 	// identity-bearing token (i.e. WithOIDCFederation) — with plain access
 	// key auth the platform rejects lock-context operations.
 	//
-	//	lockCtx := &protect.LockContext{IdentityClaim: []string{"sub"}}
+	//	lockCtx := &encryption.LockContext{IdentityClaim: []string{"sub"}}
 	//	enc, err := client.Encrypt(ctx, users.Column("email"), "secret-data",
-	//	    protect.WithLockContext(lockCtx))
-	//	pt, err := client.Decrypt(ctx, enc, protect.WithLockContext(lockCtx))
+	//	    encryption.WithLockContext(lockCtx))
+	//	pt, err := client.Decrypt(ctx, enc, encryption.WithLockContext(lockCtx))
 
 	// ---------------------------------------------------------------
 	// 11. Error handling with errors.Is
@@ -302,14 +302,14 @@ func main() {
 	}
 
 	// Programmatic error handling with sentinel errors.
-	_, err = client.EncryptQuery(ctx, users.Column("email"), protect.OrderAndRange, "test")
+	_, err = client.EncryptQuery(ctx, users.Column("email"), encryption.OrderAndRange, "test")
 	if err != nil {
 		switch {
-		case errors.Is(err, protect.ErrMissingIndex):
+		case errors.Is(err, encryption.ErrMissingIndex):
 			fmt.Println("Index not configured for this query type (expected)")
-		case errors.Is(err, protect.ErrUnknownColumn):
+		case errors.Is(err, encryption.ErrUnknownColumn):
 			fmt.Println("Column not found in schema")
-		case errors.Is(err, protect.ErrClientClosed):
+		case errors.Is(err, encryption.ErrClientClosed):
 			fmt.Println("Client was already closed")
 		default:
 			fmt.Printf("Error: %v\n", err)
