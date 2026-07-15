@@ -1,4 +1,4 @@
-package protect
+package encryption
 
 import (
 	"context"
@@ -134,17 +134,17 @@ func (c *Client) EncryptModel(ctx context.Context, schema *TableDef, model any) 
 	v := reflect.ValueOf(model)
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
-			return nil, fmt.Errorf("protect: EncryptModel: model must not be nil")
+			return nil, fmt.Errorf("encryption: EncryptModel: model must not be nil")
 		}
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("protect: EncryptModel: model must be a struct, got %s", v.Kind())
+		return nil, fmt.Errorf("encryption: EncryptModel: model must be a struct, got %s", v.Kind())
 	}
 
 	info, err := analyzeStruct(v.Type())
 	if err != nil {
-		return nil, fmt.Errorf("protect: EncryptModel: analyzing model: %w", err)
+		return nil, fmt.Errorf("encryption: EncryptModel: analyzing model: %w", err)
 	}
 
 	result := make(map[string]any, len(info.EncryptedFields)+len(info.PlainFields))
@@ -164,7 +164,7 @@ func (c *Client) EncryptModel(ctx context.Context, schema *TableDef, model any) 
 
 		encrypted, err := c.Encrypt(ctx, schema.Column(ef.Column), plaintext)
 		if err != nil {
-			return nil, fmt.Errorf("protect: EncryptModel: field %q (column %q): %w", ef.MapKey, ef.Column, err)
+			return nil, fmt.Errorf("encryption: EncryptModel: field %q (column %q): %w", ef.MapKey, ef.Column, err)
 		}
 		result[ef.MapKey] = encrypted
 	}
@@ -187,16 +187,16 @@ func (c *Client) DecryptModel(ctx context.Context, schema *TableDef, data map[st
 
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
-		return fmt.Errorf("protect: DecryptModel: dest must be a non-nil pointer to a struct")
+		return fmt.Errorf("encryption: DecryptModel: dest must be a non-nil pointer to a struct")
 	}
 	v = v.Elem()
 	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("protect: DecryptModel: dest must be a pointer to a struct, got pointer to %s", v.Kind())
+		return fmt.Errorf("encryption: DecryptModel: dest must be a pointer to a struct, got pointer to %s", v.Kind())
 	}
 
 	info, err := analyzeStruct(v.Type())
 	if err != nil {
-		return fmt.Errorf("protect: DecryptModel: analyzing dest: %w", err)
+		return fmt.Errorf("encryption: DecryptModel: analyzing dest: %w", err)
 	}
 
 	// Set plain fields.
@@ -217,12 +217,12 @@ func (c *Client) DecryptModel(ctx context.Context, schema *TableDef, data map[st
 
 		encrypted, err := toEncrypted(rawVal)
 		if err != nil {
-			return fmt.Errorf("protect: DecryptModel: converting field %q to Encrypted: %w", ef.MapKey, err)
+			return fmt.Errorf("encryption: DecryptModel: converting field %q to Encrypted: %w", ef.MapKey, err)
 		}
 
 		plaintext, err := c.Decrypt(ctx, encrypted)
 		if err != nil {
-			return fmt.Errorf("protect: DecryptModel: field %q (column %q): %w", ef.MapKey, ef.Column, err)
+			return fmt.Errorf("encryption: DecryptModel: field %q (column %q): %w", ef.MapKey, ef.Column, err)
 		}
 
 		setFieldValue(v.Field(ef.Index), plaintext)
@@ -246,12 +246,12 @@ func (c *Client) BulkEncryptModels(ctx context.Context, schema *TableDef, models
 	sv := reflect.ValueOf(models)
 	if sv.Kind() == reflect.Ptr {
 		if sv.IsNil() {
-			return nil, fmt.Errorf("protect: BulkEncryptModels: models must not be nil")
+			return nil, fmt.Errorf("encryption: BulkEncryptModels: models must not be nil")
 		}
 		sv = sv.Elem()
 	}
 	if sv.Kind() != reflect.Slice {
-		return nil, fmt.Errorf("protect: BulkEncryptModels: models must be a slice, got %s", sv.Kind())
+		return nil, fmt.Errorf("encryption: BulkEncryptModels: models must be a slice, got %s", sv.Kind())
 	}
 	if sv.Len() == 0 {
 		return []map[string]any{}, nil
@@ -264,7 +264,7 @@ func (c *Client) BulkEncryptModels(ctx context.Context, schema *TableDef, models
 
 	info, err := analyzeStruct(elemType)
 	if err != nil {
-		return nil, fmt.Errorf("protect: BulkEncryptModels: analyzing model type: %w", err)
+		return nil, fmt.Errorf("encryption: BulkEncryptModels: analyzing model type: %w", err)
 	}
 
 	numModels := sv.Len()
@@ -320,11 +320,11 @@ func (c *Client) BulkEncryptModels(ctx context.Context, schema *TableDef, models
 
 	encrypted, err := c.EncryptBulk(ctx, payloads)
 	if err != nil {
-		return nil, fmt.Errorf("protect: BulkEncryptModels: %w", err)
+		return nil, fmt.Errorf("encryption: BulkEncryptModels: %w", err)
 	}
 
 	if len(encrypted) != len(positions) {
-		return nil, fmt.Errorf("protect: BulkEncryptModels: bulk encrypt returned %d results, expected %d", len(encrypted), len(positions))
+		return nil, fmt.Errorf("encryption: BulkEncryptModels: bulk encrypt returned %d results, expected %d", len(encrypted), len(positions))
 	}
 
 	// Distribute encrypted values back.
@@ -350,11 +350,11 @@ func (c *Client) BulkDecryptModels(ctx context.Context, schema *TableDef, data [
 
 	dv := reflect.ValueOf(dest)
 	if dv.Kind() != reflect.Ptr || dv.IsNil() {
-		return fmt.Errorf("protect: BulkDecryptModels: dest must be a non-nil pointer to a slice of structs")
+		return fmt.Errorf("encryption: BulkDecryptModels: dest must be a non-nil pointer to a slice of structs")
 	}
 	sliceVal := dv.Elem()
 	if sliceVal.Kind() != reflect.Slice {
-		return fmt.Errorf("protect: BulkDecryptModels: dest must be a pointer to a slice, got pointer to %s", sliceVal.Kind())
+		return fmt.Errorf("encryption: BulkDecryptModels: dest must be a pointer to a slice, got pointer to %s", sliceVal.Kind())
 	}
 
 	elemType := sliceVal.Type().Elem()
@@ -364,7 +364,7 @@ func (c *Client) BulkDecryptModels(ctx context.Context, schema *TableDef, data [
 
 	info, err := analyzeStruct(elemType)
 	if err != nil {
-		return fmt.Errorf("protect: BulkDecryptModels: analyzing dest element type: %w", err)
+		return fmt.Errorf("encryption: BulkDecryptModels: analyzing dest element type: %w", err)
 	}
 
 	numMaps := len(data)
@@ -385,7 +385,7 @@ func (c *Client) BulkDecryptModels(ctx context.Context, schema *TableDef, data [
 			}
 			encrypted, err := toEncrypted(rawVal)
 			if err != nil {
-				return fmt.Errorf("protect: BulkDecryptModels: converting field %q in map[%d] to Encrypted: %w", ef.MapKey, i, err)
+				return fmt.Errorf("encryption: BulkDecryptModels: converting field %q in map[%d] to Encrypted: %w", ef.MapKey, i, err)
 			}
 			ciphertexts = append(ciphertexts, encrypted)
 			positions = append(positions, decryptPos{mapIdx: i, fieldIdx: j})
@@ -415,11 +415,11 @@ func (c *Client) BulkDecryptModels(ctx context.Context, schema *TableDef, data [
 	if len(ciphertexts) > 0 {
 		plaintexts, err := c.DecryptBulk(ctx, ciphertexts)
 		if err != nil {
-			return fmt.Errorf("protect: BulkDecryptModels: %w", err)
+			return fmt.Errorf("encryption: BulkDecryptModels: %w", err)
 		}
 
 		if len(plaintexts) != len(positions) {
-			return fmt.Errorf("protect: BulkDecryptModels: bulk decrypt returned %d results, expected %d", len(plaintexts), len(positions))
+			return fmt.Errorf("encryption: BulkDecryptModels: bulk decrypt returned %d results, expected %d", len(plaintexts), len(positions))
 		}
 
 		for i, pos := range positions {

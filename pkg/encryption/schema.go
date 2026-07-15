@@ -1,4 +1,4 @@
-package protect
+package encryption
 
 import (
 	"fmt"
@@ -28,7 +28,7 @@ func (td *TableDef) Name() string {
 // For a non-panicking alternative, use [TableDef.ColumnOK].
 func (td *TableDef) Column(name string) ColumnRef {
 	if _, ok := td.columns[name]; !ok {
-		panic(fmt.Sprintf("protect: column %q not found in table %q", name, td.name))
+		panic(fmt.Sprintf("encryption: column %q not found in table %q", name, td.name))
 	}
 	return ColumnRef{table: td.name, column: name}
 }
@@ -49,13 +49,13 @@ func (td *TableDef) ColumnOK(name string) (ColumnRef, bool) {
 func TableSchema(tableName string, model any) (*TableDef, error) {
 	typ := reflect.TypeOf(model)
 	if typ == nil {
-		return nil, fmt.Errorf("protect.TableSchema: model must not be nil")
+		return nil, fmt.Errorf("encryption.TableSchema: model must not be nil")
 	}
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
 	if typ.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("protect.TableSchema: model must be a struct, got %s", typ.Kind())
+		return nil, fmt.Errorf("encryption.TableSchema: model must be a struct, got %s", typ.Kind())
 	}
 
 	columns := make(map[string]Column)

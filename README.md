@@ -13,7 +13,7 @@
         alt="Built by CipherStash"
       />
     </a>
-    <a href="https://github.com/cipherstash/protectgo/blob/main/LICENSE.md">
+    <a href="https://github.com/cipherstash/goencryption/blob/main/LICENSE.md">
       <img
         alt="License"
         src="https://img.shields.io/npm/l/@cipherstash/protect.svg?style=for-the-badge&labelColor=000000"
@@ -58,7 +58,7 @@ import (
     "context"
     "log"
 
-    "github.com/cipherstash/protectgo/pkg/protect"
+    "github.com/cipherstash/goencryption/pkg/encryption"
 )
 
 // Define your model. The `cs` tag marks fields for encryption.
@@ -74,13 +74,13 @@ func main() {
     ctx := context.Background()
 
     // Build schema from struct tags
-    users, err := protect.TableSchema("users", User{})
+    users, err := encryption.TableSchema("users", User{})
     if err != nil {
         log.Fatal(err)
     }
 
     // Create client — credentials from env vars or config files
-    client, err := protect.NewClient(ctx, protect.WithSchemas(users))
+    client, err := encryption.NewClient(ctx, encryption.WithSchemas(users))
     if err != nil {
         log.Fatal(err)
     }
@@ -105,7 +105,7 @@ func main() {
 ## Installing
 
 ```bash
-go get github.com/cipherstash/protectgo/pkg/protect
+go get github.com/cipherstash/goencryption/pkg/encryption
 ```
 
 The SDK links a precompiled native library via cgo — no Rust toolchain is
@@ -141,9 +141,9 @@ You can also use environment variables (see `.env.example`):
 Or pass everything explicitly:
 
 ```go
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithCredentials(workspaceCRN, accessKey, clientID, clientKey),
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithCredentials(workspaceCRN, accessKey, clientID, clientKey),
 )
 ```
 
@@ -168,10 +168,10 @@ your workspace, and caches it until expiry — your function is called again
 only when re-federation is needed.
 
 ```go
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithCredentials(crn, "", clientID, clientKey), // no access key needed
-    protect.WithOIDCFederation(func(ctx context.Context) (string, error) {
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithCredentials(crn, "", clientID, clientKey), // no access key needed
+    encryption.WithOIDCFederation(func(ctx context.Context) (string, error) {
         return identityProvider.AccessToken(ctx) // your app's IdP JWT
     }),
 )
@@ -193,9 +193,9 @@ directly. Your function is called on every keyservice request — caching and
 refresh are your responsibility:
 
 ```go
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithTokenProvider(func(ctx context.Context) (string, error) {
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithTokenProvider(func(ctx context.Context) (string, error) {
         return myTokenCache.Current(ctx)
     }),
 )
@@ -222,19 +222,19 @@ type User struct {
     Role     string    `json:"role"`                                        // not encrypted
 }
 
-users, err := protect.TableSchema("users", User{})
+users, err := encryption.TableSchema("users", User{})
 ```
 
 #### Index directives
 
 | Directive | Enables |
 |---|---|
-| `unique` | Exact-match queries (`protect.Equality`) |
+| `unique` | Exact-match queries (`encryption.Equality`) |
 | `unique(downcase)` | Case-insensitive exact match |
-| `match` | Full-text search (`protect.FreeTextSearch`) — ngram tokenizer, token length 3, k=6, m=2048 by default |
+| `match` | Full-text search (`encryption.FreeTextSearch`) — ngram tokenizer, token length 3, k=6, m=2048 by default |
 | `match(k=8,m=1024,tokenizer=standard,token_length=3,include_original=true)` | Full-text search with tuned parameters |
-| `ore` | Range queries and sorting (`protect.OrderAndRange`) |
-| `ste_vec(prefix=table/column)` | JSON path and containment queries (`protect.JSONSelector`, `protect.JSONContains`) — forces the column to `json` |
+| `ore` | Range queries and sorting (`encryption.OrderAndRange`) |
+| `ste_vec(prefix=table/column)` | JSON path and containment queries (`encryption.JSONSelector`, `encryption.JSONContains`) — forces the column to `json` |
 
 #### Type inference
 
@@ -252,7 +252,7 @@ The storage type is inferred from the Go field type. Override with
 
 The full set of types is `text`, `big_int`, `int`, `small_int`, `float`,
 `decimal`, `boolean`, `date`, `timestamp`, and `json` (constants
-`protect.CastAsText` … `protect.CastAsJSON`). The legacy names `string`
+`encryption.CastAsText` … `encryption.CastAsJSON`). The legacy names `string`
 (→ `text`) and `number` (→ `float`) are still accepted and normalized
 automatically.
 
@@ -261,20 +261,20 @@ automatically.
 For dynamic schemas or when you prefer builders over tags:
 
 ```go
-users := protect.NewSchema("users").
-    Column("email", protect.CastAsText).Equality(protect.TokenFilter{Kind: "downcase"}).FreeTextSearch().Done().
-    Column("name", protect.CastAsText).FreeTextSearch(protect.WithK(8), protect.WithM(1024)).Done().
-    Column("age", protect.CastAsBigInt).OrderAndRange().Done().
-    Column("salary", protect.CastAsDecimal).Done().
-    Column("profile", protect.CastAsJSON).SearchableJSON("users/profile").Done().
+users := encryption.NewSchema("users").
+    Column("email", encryption.CastAsText).Equality(encryption.TokenFilter{Kind: "downcase"}).FreeTextSearch().Done().
+    Column("name", encryption.CastAsText).FreeTextSearch(encryption.WithK(8), encryption.WithM(1024)).Done().
+    Column("age", encryption.CastAsBigInt).OrderAndRange().Done().
+    Column("salary", encryption.CastAsDecimal).Done().
+    Column("profile", encryption.CastAsJSON).SearchableJSON("users/profile").Done().
     Build()
 ```
 
 ### Multiple tables
 
 ```go
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users, orders, products),
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users, orders, products),
 )
 ```
 
@@ -282,18 +282,18 @@ client, err := protect.NewClient(ctx,
 
 ```go
 // Minimal — credentials from env vars or config files
-client, err := protect.NewClient(ctx, protect.WithSchemas(users))
+client, err := encryption.NewClient(ctx, encryption.WithSchemas(users))
 
 // Explicit credentials
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithCredentials(crn, accessKey, clientID, clientKey),
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithCredentials(crn, accessKey, clientID, clientKey),
 )
 
 // Multi-tenant keyset isolation — scope this client to one tenant's keys
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithKeyset("tenant-a"),   // by name, or WithKeysetID("<uuid>")
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithKeyset("tenant-a"),   // by name, or WithKeysetID("<uuid>")
 )
 
 defer client.Close()
@@ -310,9 +310,9 @@ schema. Select `EncryptedFormatV3` for databases provisioned with the v3
 schema (typed encrypted columns — see [PostgreSQL setup](#postgresql-setup)):
 
 ```go
-client, err := protect.NewClient(ctx,
-    protect.WithSchemas(users),
-    protect.WithEncryptedFormat(protect.EncryptedFormatV3),
+client, err := encryption.NewClient(ctx,
+    encryption.WithSchemas(users),
+    encryption.WithEncryptedFormat(encryption.EncryptedFormatV3),
 )
 ```
 
@@ -370,7 +370,7 @@ plaintext, err := client.Decrypt(ctx, encrypted)
 ### Bulk values
 
 ```go
-items := []protect.PlaintextItem{
+items := []encryption.PlaintextItem{
     {Column: users.Column("email"), Plaintext: "alice@example.com"},
     {Column: users.Column("email"), Plaintext: "bob@example.com"},
 }
@@ -408,45 +408,45 @@ types (including `time.Time` and all integer widths) automatically.
 ## Querying encrypted data
 
 Encrypt search terms to query encrypted columns without exposing plaintext.
-`EncryptQuery` returns an opaque `*protect.QueryTerm` — bind it directly as a
+`EncryptQuery` returns an opaque `*encryption.QueryTerm` — bind it directly as a
 SQL parameter. Depending on the column configuration and format version, a
 term may serialize as a JSON object or a bare JSON string; always treat it as
 opaque.
 
 ```go
 // Exact match
-term, err := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "alice@example.com")
+term, err := client.EncryptQuery(ctx, users.Column("email"), encryption.Equality, "alice@example.com")
 
 // Full-text search
-term, err = client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "alice")
+term, err = client.EncryptQuery(ctx, users.Column("name"), encryption.FreeTextSearch, "alice")
 
 // Range comparison (works for numbers, dates, timestamps)
-term, err = client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
+term, err = client.EncryptQuery(ctx, users.Column("age"), encryption.OrderAndRange, 25)
 
 // JSON containment — does the document contain this structure?
-term, err = client.EncryptQuery(ctx, users.Column("metadata"), protect.JSONContains,
+term, err = client.EncryptQuery(ctx, users.Column("metadata"), encryption.JSONContains,
     map[string]any{"role": "admin"})
 
 // JSON path — target one field of the document
-term, err = client.EncryptQuery(ctx, users.Column("metadata"), protect.JSONSelector, "$.role")
+term, err = client.EncryptQuery(ctx, users.Column("metadata"), encryption.JSONSelector, "$.role")
 
 // Inspect the raw payload if needed
 _ = term.String() // or term.Bytes()
 
 // Bulk — one keyservice round trip for many terms
-terms, err := client.EncryptQueryBulk(ctx, []protect.QueryItem{
-    {Column: users.Column("email"), QueryType: protect.Equality, Plaintext: "alice@example.com"},
-    {Column: users.Column("name"), QueryType: protect.FreeTextSearch, Plaintext: "bob"},
+terms, err := client.EncryptQueryBulk(ctx, []encryption.QueryItem{
+    {Column: users.Column("email"), QueryType: encryption.Equality, Plaintext: "alice@example.com"},
+    {Column: users.Column("name"), QueryType: encryption.FreeTextSearch, Plaintext: "bob"},
 })
 ```
 
 | Query type | Requires directive | SQL shape |
 |---|---|---|
-| `protect.Equality` | `unique` | `WHERE col = $1` |
-| `protect.FreeTextSearch` | `match` | `WHERE col LIKE $1` (v2) / `WHERE col @> $1` (v3) |
-| `protect.OrderAndRange` | `ore` | `WHERE col > $1`, `ORDER BY` |
-| `protect.JSONSelector` | `ste_vec` | `WHERE col -> $1 IS NOT NULL` |
-| `protect.JSONContains` | `ste_vec` | `WHERE col @> $1` |
+| `encryption.Equality` | `unique` | `WHERE col = $1` |
+| `encryption.FreeTextSearch` | `match` | `WHERE col LIKE $1` (v2) / `WHERE col @> $1` (v3) |
+| `encryption.OrderAndRange` | `ore` | `WHERE col > $1`, `ORDER BY` |
+| `encryption.JSONSelector` | `ste_vec` | `WHERE col -> $1 IS NOT NULL` |
+| `encryption.JSONContains` | `ste_vec` | `WHERE col @> $1` |
 
 See [PostgreSQL setup](#postgresql-setup) for the exact SQL, including the
 casts each format version needs.
@@ -464,13 +464,13 @@ A lock context goes further and ties **individual ciphertexts** to identity
 claims — the same claims must be presented to decrypt:
 
 ```go
-lc := &protect.LockContext{IdentityClaim: []string{"sub"}}
+lc := &encryption.LockContext{IdentityClaim: []string{"sub"}}
 
 encrypted, err := client.Encrypt(ctx, users.Column("email"), "secret",
-    protect.WithLockContext(lc))
+    encryption.WithLockContext(lc))
 
 plaintext, err := client.Decrypt(ctx, encrypted,
-    protect.WithLockContext(lc))
+    encryption.WithLockContext(lc))
 ```
 
 > [!IMPORTANT]
@@ -490,7 +490,7 @@ derivation):
 
 ```go
 encrypted, err := client.Encrypt(ctx, users.Column("email"), "alice@example.com",
-    protect.WithAuditContext(map[string]any{"request_id": reqID, "actor": "billing-service"}),
+    encryption.WithAuditContext(map[string]any{"request_id": reqID, "actor": "billing-service"}),
 )
 ```
 
@@ -601,14 +601,14 @@ Every operator also has a callable function equivalent (`eql_v3.eq(...)`,
 All errors support `errors.Is()` for programmatic handling:
 
 ```go
-_, err := client.EncryptQuery(ctx, users.Column("email"), protect.OrderAndRange, "x")
+_, err := client.EncryptQuery(ctx, users.Column("email"), encryption.OrderAndRange, "x")
 
 switch {
-case errors.Is(err, protect.ErrMissingIndex):
+case errors.Is(err, encryption.ErrMissingIndex):
     // the column has no `ore` directive
-case errors.Is(err, protect.ErrUnknownColumn):
+case errors.Is(err, encryption.ErrUnknownColumn):
     // column not in any registered schema
-case errors.Is(err, protect.ErrClientClosed):
+case errors.Is(err, encryption.ErrClientClosed):
     // client was already closed
 }
 ```
@@ -625,7 +625,7 @@ case errors.Is(err, protect.ErrClientClosed):
 | `ErrSteVecRequiresJSON` | A JSON-search directive on a non-`json` column |
 | `ErrClientClosed` | Client has been closed |
 
-Errors are `*protect.Error` values carrying the failing operation
+Errors are `*encryption.Error` values carrying the failing operation
 (`Encrypt`, `NewClient`, …) and the underlying cause via `Unwrap`.
 
 ## API reference
@@ -723,4 +723,4 @@ source.
 
 ---
 
-[Missing something?](https://github.com/cipherstash/protectgo/issues/new?template=docs-feedback.yml&title=[Docs:]%20Feedback%20on%20README.md)
+[Missing something?](https://github.com/cipherstash/goencryption/issues/new?template=docs-feedback.yml&title=[Docs:]%20Feedback%20on%20README.md)

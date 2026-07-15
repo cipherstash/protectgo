@@ -1,4 +1,4 @@
-package protect
+package encryption
 
 /*
 #include <stdint.h>

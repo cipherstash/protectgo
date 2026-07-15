@@ -1,4 +1,4 @@
-package protect
+package encryption
 
 import (
 	"context"
@@ -946,12 +946,12 @@ func TestErrorUnknownMessage(t *testing.T) {
 func TestErrorClientClosed(t *testing.T) {
 	t.Parallel()
 
-	err := &Error{Op: "Encrypt", Err: ErrClientClosed, Message: "protect: client is closed"}
+	err := &Error{Op: "Encrypt", Err: ErrClientClosed, Message: "encryption: client is closed"}
 
 	if !errors.Is(err, ErrClientClosed) {
 		t.Error("errors.Is(err, ErrClientClosed) = false, want true")
 	}
-	if err.Error() != "protect: client is closed" {
+	if err.Error() != "encryption: client is closed" {
 		t.Errorf("Error(): got %q", err.Error())
 	}
 }

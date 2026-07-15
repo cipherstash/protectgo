@@ -1,11 +1,11 @@
-// Package protect provides field-level encryption with searchable encryption support,
+// Package encryption provides field-level encryption with searchable encryption support,
 // powered by CipherStash ZeroKMS.
 //
 // Define your schema using struct tags or the programmatic builder, then use
 // the Client to encrypt, decrypt, and query encrypted data.
 //
-//	users, err := protect.TableSchema("users", User{})
-//	client, err := protect.NewClient(ctx, protect.WithSchemas(users))
+//	users, err := encryption.TableSchema("users", User{})
+//	client, err := encryption.NewClient(ctx, encryption.WithSchemas(users))
 //	defer client.Close()
 //
 //	encrypted, err := client.Encrypt(ctx, users.Column("email"), "john@example.com")
@@ -21,7 +21,7 @@
 // reads configuration from environment variables (CS_WORKSPACE_CRN,
 // CS_CLIENT_ACCESS_KEY, CS_CLIENT_ID, CS_CLIENT_KEY) or from
 // cipherstash.toml / cipherstash.secret.toml in the working directory.
-package protect
+package encryption
 
 /*
 #cgo LDFLAGS: -L${SRCDIR}
@@ -113,7 +113,7 @@ func (c *Client) acquirePtr(op string) (unsafe.Pointer, func(), error) {
 	c.mu.RLock()
 	if c.ptr == nil {
 		c.mu.RUnlock()
-		return nil, nil, &Error{Op: op, Err: ErrClientClosed, Message: "protect: client is closed"}
+		return nil, nil, &Error{Op: op, Err: ErrClientClosed, Message: "encryption: client is closed"}
 	}
 	return c.ptr, c.mu.RUnlock, nil
 }
@@ -538,7 +538,7 @@ type ffiNewClientOptions struct {
 	EqlVersion    int              `json:"eqlVersion"`
 }
 
-// NewClient creates a new protect client configured with the given options.
+// NewClient creates a new encryption client configured with the given options.
 // The ctx parameter is checked for cancellation before the FFI call.
 func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	const op = "NewClient"
@@ -554,7 +554,7 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 		return nil, &Error{
 			Op:      op,
 			Err:     ErrAuthStrategy,
-			Message: "protect: NewClient: WithOIDCFederation and WithTokenProvider are mutually exclusive",
+			Message: "encryption: NewClient: WithOIDCFederation and WithTokenProvider are mutually exclusive",
 		}
 	}
 
@@ -578,7 +578,7 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 			return nil, &Error{
 				Op:      op,
 				Err:     ErrAuthStrategy,
-				Message: "protect: NewClient: WithOIDCFederation requires a workspace CRN: set it via WithCredentials or the CS_WORKSPACE_CRN environment variable (workspaceCrn is required)",
+				Message: "encryption: NewClient: WithOIDCFederation requires a workspace CRN: set it via WithCredentials or the CS_WORKSPACE_CRN environment variable (workspaceCrn is required)",
 			}
 		}
 		if ffiOpts.ClientOpts == nil {
@@ -595,12 +595,12 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -758,7 +758,7 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -781,7 +781,7 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -799,7 +799,7 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 
 	var encrypted Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	return &encrypted, nil
@@ -823,7 +823,7 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -842,7 +842,7 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -860,7 +860,7 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 
 	var plaintext any
 	if err := decodeFFIJSON([]byte(plaintextJSON), &plaintext); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	return plaintext, nil
@@ -883,7 +883,7 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -920,7 +920,7 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -938,7 +938,7 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 
 	var encrypted []Encrypted
 	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	return encrypted, nil
@@ -960,7 +960,7 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -989,7 +989,7 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -1007,7 +1007,7 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 	var plaintexts []any
 	if err := decodeFFIJSON([]byte(plaintextJSON), &plaintexts); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	return plaintexts, nil
@@ -1032,7 +1032,7 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -1061,7 +1061,7 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -1084,7 +1084,7 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 
 	var ffiResults []ffiDecryptResult
 	if err := decodeFFIJSON([]byte(resultsJSON), &ffiResults); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	results := make([]DecryptResult, len(ffiResults))
@@ -1120,7 +1120,7 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -1149,7 +1149,7 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -1184,7 +1184,7 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: %s: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: %w", op, err)
 	}
 
 	co := buildCallOpts(opts)
@@ -1226,7 +1226,7 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
@@ -1244,7 +1244,7 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 
 	var raw []json.RawMessage
 	if err := json.Unmarshal([]byte(termsJSON), &raw); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
+		return nil, fmt.Errorf("encryption: %s: unmarshaling result: %w", op, err)
 	}
 
 	terms := make([]*QueryTerm, len(raw))
