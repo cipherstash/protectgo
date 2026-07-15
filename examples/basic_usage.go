@@ -59,6 +59,37 @@ func main() {
 	defer client.Close()
 
 	// ---------------------------------------------------------------
+	// Per-user identity federation (optional)
+	// ---------------------------------------------------------------
+	//
+	// WithOIDCFederation makes every encryption and decryption identity-aware
+	// without threading any per-operation context through your calls. Return a
+	// fresh third-party OIDC access token (a JWT) from your identity provider
+	// (Clerk, Auth0, Supabase, ...); the client exchanges it for a CipherStash
+	// service token and caches it until expiry. A workspace CRN is required,
+	// from WithCredentials or the CS_WORKSPACE_CRN environment variable.
+	//
+	//	client, err := protect.NewClient(ctx,
+	//	    protect.WithSchemas(users),
+	//	    protect.WithCredentials(crn, accessKey, clientID, clientKey),
+	//	    protect.WithOIDCFederation(func(ctx context.Context) (string, error) {
+	//	        return identityProvider.AccessToken(ctx) // your app's IdP JWT
+	//	    }),
+	//	)
+
+	// ---------------------------------------------------------------
+	// Ciphertext format version (optional)
+	// ---------------------------------------------------------------
+	//
+	// The default is EncryptedFormatV2. Select V3 only for databases
+	// initialized with the v3 CipherStash database schema:
+	//
+	//	client, err := protect.NewClient(ctx,
+	//	    protect.WithSchemas(users),
+	//	    protect.WithEncryptedFormat(protect.EncryptedFormatV3),
+	//	)
+
+	// ---------------------------------------------------------------
 	// 3. Encrypt and decrypt a model (struct-based)
 	// ---------------------------------------------------------------
 
@@ -143,30 +174,40 @@ func main() {
 	// ---------------------------------------------------------------
 	// 6. Query encryption (for searching encrypted columns)
 	// ---------------------------------------------------------------
+	//
+	// EncryptQuery returns an opaque *protect.QueryTerm. Treat it as a value to
+	// bind into your SQL statement — do not inspect its shape. Depending on the
+	// column's index configuration it may serialize as a JSON object or a bare
+	// JSON string.
 
 	// Exact match query
-	queryResult, err := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "john.doe@example.com")
+	queryTerm, err := client.EncryptQuery(ctx, users.Column("email"), protect.Equality, "john.doe@example.com")
 	if err != nil {
 		log.Fatalf("Failed to encrypt query: %v", err)
 	}
 
-	fmt.Printf("\nEncrypted equality query (unique index: %s)\n", *queryResult.UniqueIndex)
+	fmt.Printf("\nEncrypted equality query term: %s\n", queryTerm)
 
 	// Full-text search query
-	searchResult, err := client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "john")
+	searchTerm, err := client.EncryptQuery(ctx, users.Column("name"), protect.FreeTextSearch, "john")
 	if err != nil {
 		log.Fatalf("Failed to encrypt search query: %v", err)
 	}
 
-	fmt.Printf("Encrypted match query (bloom filter length: %d)\n", len(*searchResult.MatchIndex))
+	fmt.Printf("Encrypted match query term (%d bytes)\n", len(searchTerm.Bytes()))
 
 	// Range query
-	rangeResult, err := client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
+	rangeTerm, err := client.EncryptQuery(ctx, users.Column("age"), protect.OrderAndRange, 25)
 	if err != nil {
 		log.Fatalf("Failed to encrypt range query: %v", err)
 	}
 
-	fmt.Printf("Encrypted range query (ORE index length: %d)\n", len(*rangeResult.OreIndex))
+	fmt.Printf("Encrypted range query term (%d bytes)\n", len(rangeTerm.Bytes()))
+
+	// Bind a query term into a parameterized SQL statement:
+	//
+	//   rows, err := db.QueryContext(ctx,
+	//       "SELECT * FROM users WHERE email = $1", queryTerm)
 
 	// Bulk query encryption
 	bulkQueries, err := client.EncryptQueryBulk(ctx, []protect.QueryItem{
@@ -177,7 +218,7 @@ func main() {
 		log.Fatalf("Failed to bulk encrypt queries: %v", err)
 	}
 
-	fmt.Printf("Bulk encrypted %d queries\n", len(bulkQueries))
+	fmt.Printf("Bulk encrypted %d query terms\n", len(bulkQueries))
 
 	// ---------------------------------------------------------------
 	// 7. Bulk encrypt and decrypt individual values
@@ -228,28 +269,23 @@ func main() {
 	fmt.Printf("IsEncrypted(plain string):    %v\n", protect.IsEncrypted("not encrypted"))
 
 	// ---------------------------------------------------------------
-	// 10. Identity-aware encryption (lock context)
+	// 10. Identity-aware encryption
 	// ---------------------------------------------------------------
-
-	lockContext := &protect.LockContext{
-		IdentityClaim: []string{"user:12345"},
-	}
-
-	lockedEncrypted, err := client.Encrypt(ctx, users.Column("email"), "secret-data",
-		protect.WithLockContext(lockContext),
-	)
-	if err != nil {
-		log.Fatalf("Failed to encrypt with lock context: %v", err)
-	}
-
-	lockedPlaintext, err := client.Decrypt(ctx, lockedEncrypted,
-		protect.WithLockContext(lockContext),
-	)
-	if err != nil {
-		log.Fatalf("Failed to decrypt with lock context: %v", err)
-	}
-
-	fmt.Printf("Identity-aware decrypt: %v\n", lockedPlaintext)
+	//
+	// The simplest way to bind encryption to a user's identity is
+	// WithOIDCFederation (see the commented client setup above): every
+	// operation then runs under a service token derived from that user's
+	// identity provider session, with no per-operation configuration.
+	//
+	// A lock context additionally ties individual ciphertexts to identity
+	// claims. It requires the client to authenticate with an
+	// identity-bearing token (i.e. WithOIDCFederation) — with plain access
+	// key auth the platform rejects lock-context operations.
+	//
+	//	lockCtx := &protect.LockContext{IdentityClaim: []string{"sub"}}
+	//	enc, err := client.Encrypt(ctx, users.Column("email"), "secret-data",
+	//	    protect.WithLockContext(lockCtx))
+	//	pt, err := client.Decrypt(ctx, enc, protect.WithLockContext(lockCtx))
 
 	// ---------------------------------------------------------------
 	// 11. Error handling with errors.Is

@@ -1,6 +1,7 @@
 package protect
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -55,13 +56,18 @@ func TestCastAsConstants(t *testing.T) {
 		constant CastAs
 		expected string
 	}{
+		{"Text", CastAsText, "text"},
 		{"BigInt", CastAsBigInt, "bigint"},
+		{"Int", CastAsInt, "int"},
+		{"SmallInt", CastAsSmallInt, "small_int"},
+		{"Float", CastAsFloat, "float"},
+		{"Decimal", CastAsDecimal, "decimal"},
 		{"Boolean", CastAsBoolean, "boolean"},
 		{"Date", CastAsDate, "date"},
-		{"Number", CastAsNumber, "number"},
-		{"String", CastAsString, "string"},
-		{"Text", CastAsText, "text"},
+		{"Timestamp", CastAsTimestamp, "timestamp"},
 		{"JSON", CastAsJSON, "json"},
+		{"String (legacy alias)", CastAsString, "string"},
+		{"Number (legacy alias)", CastAsNumber, "number"},
 	}
 
 	for _, tc := range tests {
@@ -70,6 +76,39 @@ func TestCastAsConstants(t *testing.T) {
 			t.Parallel()
 			if string(tc.constant) != tc.expected {
 				t.Errorf("Expected %s, got %s", tc.expected, string(tc.constant))
+			}
+		})
+	}
+}
+
+func TestNormalizeCastAs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input CastAs
+		want  CastAs
+	}{
+		{"string alias to text", CastAsString, CastAsText},
+		{"number alias to float", CastAsNumber, CastAsFloat},
+		{"bigint to big_int", CastAsBigInt, "big_int"},
+		{"text unchanged", CastAsText, CastAsText},
+		{"int unchanged", CastAsInt, CastAsInt},
+		{"small_int unchanged", CastAsSmallInt, CastAsSmallInt},
+		{"float unchanged", CastAsFloat, CastAsFloat},
+		{"decimal unchanged", CastAsDecimal, CastAsDecimal},
+		{"boolean unchanged", CastAsBoolean, CastAsBoolean},
+		{"date unchanged", CastAsDate, CastAsDate},
+		{"timestamp unchanged", CastAsTimestamp, CastAsTimestamp},
+		{"json unchanged", CastAsJSON, CastAsJSON},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeCastAs(tc.input); got != tc.want {
+				t.Errorf("normalizeCastAs(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -267,16 +306,6 @@ func TestWithLockContext(t *testing.T) {
 	}
 }
 
-func TestWithServiceToken(t *testing.T) {
-	t.Parallel()
-
-	co := buildCallOpts([]Option{WithServiceToken("tok-abc")})
-
-	if co.serviceToken == nil || *co.serviceToken != "tok-abc" {
-		t.Errorf("serviceToken: got %v, want %q", co.serviceToken, "tok-abc")
-	}
-}
-
 func TestWithAuditContext(t *testing.T) {
 	t.Parallel()
 
@@ -303,11 +332,113 @@ func TestBuildCallOptsEmpty(t *testing.T) {
 	if co.lockContext != nil {
 		t.Error("lockContext: expected nil")
 	}
-	if co.serviceToken != nil {
-		t.Error("serviceToken: expected nil")
-	}
 	if co.unverifiedContext != nil {
 		t.Error("unverifiedContext: expected nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auth strategy and format option tests
+// ---------------------------------------------------------------------------
+
+func TestWithOIDCFederation(t *testing.T) {
+	t.Parallel()
+
+	getToken := func(context.Context) (string, error) { return "jwt", nil }
+	cfg := &clientConfig{}
+	WithOIDCFederation(getToken)(cfg)
+
+	if cfg.oidcGetToken == nil {
+		t.Fatal("oidcGetToken: expected non-nil")
+	}
+	if cfg.tokenProviderGetToken != nil {
+		t.Error("tokenProviderGetToken: expected nil")
+	}
+	tok, err := cfg.oidcGetToken(context.Background())
+	if err != nil || tok != "jwt" {
+		t.Errorf("oidcGetToken() = (%q, %v), want (\"jwt\", nil)", tok, err)
+	}
+}
+
+func TestWithTokenProvider(t *testing.T) {
+	t.Parallel()
+
+	getToken := func(context.Context) (string, error) { return "cts-token", nil }
+	cfg := &clientConfig{}
+	WithTokenProvider(getToken)(cfg)
+
+	if cfg.tokenProviderGetToken == nil {
+		t.Fatal("tokenProviderGetToken: expected non-nil")
+	}
+	if cfg.oidcGetToken != nil {
+		t.Error("oidcGetToken: expected nil")
+	}
+}
+
+func TestWithEncryptedFormat(t *testing.T) {
+	t.Parallel()
+
+	cfg := &clientConfig{}
+	WithEncryptedFormat(EncryptedFormatV3)(cfg)
+	if cfg.encryptedFormat != EncryptedFormatV3 {
+		t.Errorf("encryptedFormat: got %d, want %d", cfg.encryptedFormat, EncryptedFormatV3)
+	}
+}
+
+func TestResolveEqlVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input EncryptedFormat
+		want  int
+	}{
+		{"unset defaults to v2", EncryptedFormat(0), 2},
+		{"explicit v2", EncryptedFormatV2, 2},
+		{"explicit v3", EncryptedFormatV3, 3},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveEqlVersion(tc.input); got != tc.want {
+				t.Errorf("resolveEqlVersion(%d) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// NewClient must reject WithOIDCFederation without a workspace CRN before it
+// makes any FFI call.
+func TestNewClientOIDCWithoutCRN(t *testing.T) {
+	// Not parallel: mutates the CS_WORKSPACE_CRN environment variable.
+	t.Setenv("CS_WORKSPACE_CRN", "")
+
+	_, err := NewClient(context.Background(),
+		WithOIDCFederation(func(context.Context) (string, error) { return "jwt", nil }),
+	)
+	if err == nil {
+		t.Fatal("expected error for OIDC federation without a workspace CRN")
+	}
+	if !errors.Is(err, ErrAuthStrategy) {
+		t.Errorf("expected ErrAuthStrategy, got: %v", err)
+	}
+}
+
+// NewClient must reject configuring both auth strategies at once before any FFI
+// call.
+func TestNewClientMutuallyExclusiveAuthStrategies(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(context.Background(),
+		WithOIDCFederation(func(context.Context) (string, error) { return "jwt", nil }),
+		WithTokenProvider(func(context.Context) (string, error) { return "cts", nil }),
+	)
+	if err == nil {
+		t.Fatal("expected error for mutually exclusive auth strategies")
+	}
+	if !errors.Is(err, ErrAuthStrategy) {
+		t.Errorf("expected ErrAuthStrategy, got: %v", err)
 	}
 }
 
@@ -458,6 +589,200 @@ func TestEncryptedJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncryptedKindAndOpRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	k := "ct"
+	op := "eq"
+	ct := "cipher"
+	original := Encrypted{
+		Identifier: Identifier{Table: "t", Column: "c"},
+		Version:    2,
+		K:          &k,
+		Ciphertext: &ct,
+		Op:         &op,
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	// The k and op fields must appear in the wire JSON.
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal to map failed: %v", err)
+	}
+	if raw["k"] != "ct" {
+		t.Errorf("k: got %v, want %q", raw["k"], "ct")
+	}
+	if raw["op"] != "eq" {
+		t.Errorf("op: got %v, want %q", raw["op"], "eq")
+	}
+
+	var decoded Encrypted
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if decoded.K == nil || *decoded.K != "ct" {
+		t.Errorf("K: got %v, want %q", decoded.K, "ct")
+	}
+	if decoded.Op == nil || *decoded.Op != "eq" {
+		t.Errorf("Op: got %v, want %q", decoded.Op, "eq")
+	}
+}
+
+func TestEncryptedOmitsKindAndOpWhenNil(t *testing.T) {
+	t.Parallel()
+
+	ct := "cipher"
+	enc := Encrypted{
+		Identifier: Identifier{Table: "t", Column: "c"},
+		Version:    2,
+		Ciphertext: &ct,
+	}
+	data, err := json.Marshal(enc)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if _, ok := raw["k"]; ok {
+		t.Error("k: should be omitted when nil")
+	}
+	if _, ok := raw["op"]; ok {
+		t.Error("op: should be omitted when nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryTerm tests
+// ---------------------------------------------------------------------------
+
+func TestQueryTermObject(t *testing.T) {
+	t.Parallel()
+
+	var qt QueryTerm
+	if err := json.Unmarshal([]byte(`{"hm":"abc","i":{"t":"users","c":"email"}}`), &qt); err != nil {
+		t.Fatalf("UnmarshalJSON failed: %v", err)
+	}
+
+	if got := qt.String(); got != `{"hm":"abc","i":{"t":"users","c":"email"}}` {
+		t.Errorf("String(): got %q", got)
+	}
+
+	// Marshaling must reproduce the raw JSON verbatim.
+	out, err := json.Marshal(qt)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+	if string(out) != `{"hm":"abc","i":{"t":"users","c":"email"}}` {
+		t.Errorf("MarshalJSON: got %s", out)
+	}
+}
+
+func TestQueryTermBareString(t *testing.T) {
+	t.Parallel()
+
+	// A query term may be a bare JSON string, e.g. an ste_vec selector.
+	var qt QueryTerm
+	if err := json.Unmarshal([]byte(`"c2VsZWN0b3I="`), &qt); err != nil {
+		t.Fatalf("UnmarshalJSON failed: %v", err)
+	}
+	if got := qt.String(); got != `"c2VsZWN0b3I="` {
+		t.Errorf("String(): got %q", got)
+	}
+	if got := string(qt.Bytes()); got != `"c2VsZWN0b3I="` {
+		t.Errorf("Bytes(): got %q", got)
+	}
+}
+
+func TestQueryTermZeroValueMarshalsNull(t *testing.T) {
+	t.Parallel()
+
+	var qt QueryTerm
+	out, err := json.Marshal(qt)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+	if string(out) != "null" {
+		t.Errorf("MarshalJSON: got %s, want null", out)
+	}
+}
+
+func TestQueryTermInStruct(t *testing.T) {
+	t.Parallel()
+
+	// A QueryTerm embedded in a larger payload round-trips its raw value.
+	type payload struct {
+		Term *QueryTerm `json:"term"`
+	}
+	var p payload
+	if err := json.Unmarshal([]byte(`{"term":{"ob":["x"]}}`), &p); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if p.Term == nil {
+		t.Fatal("Term: expected non-nil")
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if string(out) != `{"term":{"ob":["x"]}}` {
+		t.Errorf("round-trip: got %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Token callback envelope tests
+// ---------------------------------------------------------------------------
+
+func TestBuildTokenEnvelopeSuccess(t *testing.T) {
+	t.Parallel()
+
+	got := buildTokenEnvelope("my-token", nil)
+	if got != `{"token":"my-token"}` {
+		t.Errorf("buildTokenEnvelope: got %s", got)
+	}
+}
+
+func TestBuildTokenEnvelopeFailure(t *testing.T) {
+	t.Parallel()
+
+	got := buildTokenEnvelope("", errors.New("network down"))
+
+	var env struct {
+		Failure struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"failure"`
+	}
+	if err := json.Unmarshal([]byte(got), &env); err != nil {
+		t.Fatalf("failure envelope is not valid JSON: %v (%s)", err, got)
+	}
+	if env.Failure.Type != "PROVIDER_ERROR" {
+		t.Errorf("failure type: got %q, want %q", env.Failure.Type, "PROVIDER_ERROR")
+	}
+	if env.Failure.Error.Message != "network down" {
+		t.Errorf("failure message: got %q, want %q", env.Failure.Error.Message, "network down")
+	}
+}
+
+func TestProviderFailureEnvelopeEscapesMessage(t *testing.T) {
+	t.Parallel()
+
+	// A message containing quotes must still yield valid JSON.
+	got := providerFailureEnvelope(`he said "boom"`)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(got), &env); err != nil {
+		t.Fatalf("envelope is not valid JSON: %v (%s)", err, got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DecryptResult tests
 // ---------------------------------------------------------------------------
@@ -550,6 +875,26 @@ func TestErrorSentinels(t *testing.T) {
 			"ste_vec requires json",
 			"ste_vec index requires cast_as to be json",
 			ErrSteVecRequiresJSON,
+		},
+		{
+			"unsupported format for column",
+			"column \"email\": no EQL v3 column type for this configuration",
+			ErrUnsupportedFormat,
+		},
+		{
+			"invalid ciphertext",
+			"invalid ciphertext: could not parse payload",
+			ErrInvalidCiphertext,
+		},
+		{
+			"auth strategy missing callback",
+			"auth strategy requires a token callback",
+			ErrAuthStrategy,
+		},
+		{
+			"auth strategy missing workspace crn",
+			"workspaceCrn is required for oidcFederation",
+			ErrAuthStrategy,
 		},
 	}
 

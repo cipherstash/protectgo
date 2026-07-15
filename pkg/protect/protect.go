@@ -34,14 +34,37 @@ package protect
 #cgo linux,amd64,musl LDFLAGS: -lprotect_ffi_linux_x64_musl
 #include "protect_ffi.h"
 #include <stdlib.h>
+#include <stdint.h>
+
+// protectgoGetToken is the Go token callback exported in callback.go. It is
+// declared here (a declaration, not a definition) so the static bridge
+// functions below can reference it as a C function pointer of type
+// ProtectTokenFn.
+extern char *protectgoGetToken(uint64_t handle);
+
+// protectNewClientWithToken calls protect_new_client wiring the exported Go
+// token callback for the given cgo.Handle value.
+static struct CResult protectNewClientWithToken(const char *opts, uint64_t handle) {
+    return protect_new_client(opts, protectgoGetToken, handle);
+}
+
+// protectNewClientNoToken calls protect_new_client with no token callback,
+// passing a NULL function pointer and a zero handle.
+static struct CResult protectNewClientNoToken(const char *opts) {
+    return protect_new_client(opts, NULL, 0);
+}
 */
 import "C"
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"runtime/cgo"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -59,6 +82,12 @@ var _ io.Closer = (*Client)(nil)
 type Client struct {
 	mu  sync.RWMutex
 	ptr unsafe.Pointer
+
+	// tokenHandle references the per-client token provider registered with the
+	// native layer when an authentication strategy callback is configured. It
+	// is released by Close. hasToken reports whether tokenHandle is live.
+	tokenHandle cgo.Handle
+	hasToken    bool
 }
 
 // Close releases resources held by the client. Implements [io.Closer].
@@ -71,6 +100,10 @@ func (c *Client) Close() error {
 	}
 	C.protect_free_client((*C.struct_Client)(c.ptr))
 	c.ptr = nil
+	if c.hasToken {
+		c.tokenHandle.Delete()
+		c.hasToken = false
+	}
 	return nil
 }
 
@@ -117,17 +150,37 @@ const (
 // CastAs and schema config types (exported for schema building and FFI JSON)
 // ---------------------------------------------------------------------------
 
-// CastAs represents the target data type for column casting in the encryption config.
+// CastAs represents the target data type for column casting in the encryption
+// config. Values are normalized to their canonical form when the configuration
+// is sent to the native layer, so both the canonical constants and the legacy
+// aliases below produce identical wire output.
+//
+// Canonical types: [CastAsText], [CastAsBigInt], [CastAsInt], [CastAsSmallInt],
+// [CastAsFloat], [CastAsDecimal], [CastAsBoolean], [CastAsDate],
+// [CastAsTimestamp], and [CastAsJSON].
 type CastAs string
 
 const (
-	CastAsBigInt  CastAs = "bigint"
-	CastAsBoolean CastAs = "boolean"
-	CastAsDate    CastAs = "date"
-	CastAsNumber  CastAs = "number"
-	CastAsString  CastAs = "string"
-	CastAsText    CastAs = "text"
-	CastAsJSON    CastAs = "json"
+	// Canonical cast types.
+
+	CastAsText      CastAs = "text"
+	CastAsBigInt    CastAs = "bigint"
+	CastAsInt       CastAs = "int"
+	CastAsSmallInt  CastAs = "small_int"
+	CastAsFloat     CastAs = "float"
+	CastAsDecimal   CastAs = "decimal"
+	CastAsBoolean   CastAs = "boolean"
+	CastAsDate      CastAs = "date"
+	CastAsTimestamp CastAs = "timestamp"
+	CastAsJSON      CastAs = "json"
+
+	// CastAsString is a legacy alias for [CastAsText]. It is normalized to
+	// "text" on the wire.
+	CastAsString CastAs = "string"
+
+	// CastAsNumber is a legacy alias for [CastAsFloat]. It is normalized to
+	// "float" on the wire.
+	CastAsNumber CastAs = "number"
 
 	// CastAsJson is a deprecated alias for [CastAsJSON].
 	//
@@ -135,7 +188,23 @@ const (
 	CastAsJson = CastAsJSON
 )
 
-// Identifier represents a table and column identifier in the EQL wire format.
+// normalizeCastAs maps a public CastAs value to its canonical wire name.
+// Legacy aliases are rewritten: string→text, number→float, bigint→big_int.
+// All other values are already canonical and returned unchanged.
+func normalizeCastAs(c CastAs) CastAs {
+	switch c {
+	case CastAsString:
+		return CastAsText
+	case CastAsNumber:
+		return CastAsFloat
+	case CastAsBigInt:
+		return "big_int"
+	default:
+		return c
+	}
+}
+
+// Identifier represents a table and column identifier in the encrypted wire format.
 type Identifier struct {
 	Table  string `json:"t"`
 	Column string `json:"c"`
@@ -208,16 +277,55 @@ type LockContext struct {
 }
 
 // Encrypted represents an encrypted value with its metadata and indexes.
-// The JSON tags match the EQL wire format and must not be changed.
+// The JSON tags match the native wire format and must not be changed.
+// Fields are preserved verbatim so that a ciphertext round-tripped through Go
+// is byte-for-byte compatible with what the native layer emits.
 type Encrypted struct {
 	Identifier  Identifier `json:"i"`
 	Version     uint16     `json:"v"`
+	K           *string    `json:"k,omitempty"`
 	Ciphertext  *string    `json:"c,omitempty"`
 	OreIndex    *[]string  `json:"ob,omitempty"`
 	MatchIndex  *[]uint16  `json:"bf,omitempty"`
 	UniqueIndex *string    `json:"hm,omitempty"`
 	SteVecIndex any        `json:"sv,omitempty"`
+	Op          *string    `json:"op,omitempty"`
 }
+
+// QueryTerm is an opaque encrypted query term produced by [Client.EncryptQuery]
+// and [Client.EncryptQueryBulk]. Bind it directly into a SQL statement as the
+// search value against an encrypted column.
+//
+// Depending on the column's index configuration, a query term may serialize as
+// a JSON object or as a bare JSON string. Treat it as an opaque value: inspect
+// it with [QueryTerm.Bytes] or [QueryTerm.String], and marshal it with
+// encoding/json to obtain the exact payload the database expects. Do not depend
+// on its internal shape.
+type QueryTerm struct {
+	raw json.RawMessage
+}
+
+// MarshalJSON returns the raw query-term JSON. A zero-value QueryTerm marshals
+// as JSON null.
+func (q QueryTerm) MarshalJSON() ([]byte, error) {
+	if len(q.raw) == 0 {
+		return []byte("null"), nil
+	}
+	return q.raw, nil
+}
+
+// UnmarshalJSON stores the raw JSON verbatim without interpreting its shape.
+func (q *QueryTerm) UnmarshalJSON(data []byte) error {
+	q.raw = append(q.raw[:0], data...)
+	return nil
+}
+
+// Bytes returns the raw JSON encoding of the query term. The returned slice
+// must not be modified.
+func (q QueryTerm) Bytes() []byte { return q.raw }
+
+// String returns the raw JSON encoding of the query term as a string.
+func (q QueryTerm) String() string { return string(q.raw) }
 
 // PlaintextItem is a single value for bulk encryption via [Client.EncryptBulk].
 type PlaintextItem struct {
@@ -263,10 +371,35 @@ type clientConfig struct {
 	clientKey    string
 	keysetName   string
 	keysetID     string
+
+	// oidcGetToken, when set, selects the OIDC federation auth strategy.
+	oidcGetToken func(ctx context.Context) (string, error)
+	// tokenProviderGetToken, when set, selects the direct token provider
+	// auth strategy.
+	tokenProviderGetToken func(ctx context.Context) (string, error)
+
+	// encryptedFormat selects the ciphertext format version. The zero value
+	// means "use the default" ([EncryptedFormatV2]).
+	encryptedFormat EncryptedFormat
 }
 
 // ClientOption configures the Client during construction.
 type ClientOption func(*clientConfig)
+
+// EncryptedFormat selects the on-disk ciphertext format version produced by the
+// client. Use it with [WithEncryptedFormat].
+type EncryptedFormat int
+
+const (
+	// EncryptedFormatV2 is the default ciphertext format, compatible with
+	// databases initialized with the v2 CipherStash database schema.
+	EncryptedFormatV2 EncryptedFormat = 2
+
+	// EncryptedFormatV3 targets databases initialized with the v3 CipherStash
+	// database schema. Select it only when your database has been provisioned
+	// for the v3 schema.
+	EncryptedFormatV3 EncryptedFormat = 3
+)
 
 // WithSchemas registers one or more table schemas with the client.
 // The schemas define which tables and columns can be encrypted.
@@ -301,13 +434,56 @@ func WithKeysetID(id string) ClientOption {
 	}
 }
 
+// WithOIDCFederation configures per-user identity federation. The provided
+// getToken returns a fresh third-party OIDC access token (a JWT) from your
+// application's identity provider (Clerk, Auth0, Supabase, and similar).
+//
+// The client exchanges that token for a short-lived CipherStash service token
+// and caches it until expiry, invoking getToken again only when it must
+// re-federate. This makes every encryption and decryption identity-aware at the
+// client level, without threading any per-operation context through your calls.
+//
+// A workspace CRN is required: supply it via [WithCredentials] or the
+// CS_WORKSPACE_CRN environment variable. [NewClient] returns an error wrapping
+// [ErrAuthStrategy] if neither is present.
+//
+// WithOIDCFederation and [WithTokenProvider] are mutually exclusive.
+func WithOIDCFederation(getToken func(ctx context.Context) (string, error)) ClientOption {
+	return func(c *clientConfig) {
+		c.oidcGetToken = getToken
+	}
+}
+
+// WithTokenProvider supplies a CipherStash service token directly. The provided
+// getToken is called on every keyservice request and must return a valid
+// service token; caching is the caller's responsibility.
+//
+// This is an advanced option for callers that mint or broker CipherStash
+// service tokens themselves. Most applications should prefer
+// [WithOIDCFederation], which handles token exchange and caching.
+//
+// WithTokenProvider and [WithOIDCFederation] are mutually exclusive.
+func WithTokenProvider(getToken func(ctx context.Context) (string, error)) ClientOption {
+	return func(c *clientConfig) {
+		c.tokenProviderGetToken = getToken
+	}
+}
+
+// WithEncryptedFormat selects the ciphertext format version. The default is
+// [EncryptedFormatV2]. Select [EncryptedFormatV3] only for databases that have
+// been initialized with the v3 CipherStash database schema.
+func WithEncryptedFormat(f EncryptedFormat) ClientOption {
+	return func(c *clientConfig) {
+		c.encryptedFormat = f
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Operation options (functional options for Encrypt/Decrypt/Query calls)
 // ---------------------------------------------------------------------------
 
 type callOpts struct {
 	lockContext       *LockContext
-	serviceToken      *string
 	unverifiedContext any
 }
 
@@ -317,11 +493,6 @@ type Option func(*callOpts)
 // WithLockContext attaches identity claims for identity-aware encryption.
 func WithLockContext(lc *LockContext) Option {
 	return func(o *callOpts) { o.lockContext = lc }
-}
-
-// WithServiceToken sets an explicit service token for the operation.
-func WithServiceToken(token string) Option {
-	return func(o *callOpts) { o.serviceToken = &token }
 }
 
 // WithAuditContext attaches unverified context for audit logging.
@@ -341,83 +512,193 @@ func buildCallOpts(opts []Option) callOpts {
 // NewClient
 // ---------------------------------------------------------------------------
 
+// FFI-facing option types for NewClient. Field names use camelCase to match
+// the native wire contract.
+type ffiKeyset struct {
+	Name *string `json:"name,omitempty"`
+	ID   *string `json:"id,omitempty"`
+}
+
+type ffiClientOpts struct {
+	WorkspaceCrn *string    `json:"workspaceCrn,omitempty"`
+	AccessKey    *string    `json:"accessKey,omitempty"`
+	ClientID     *string    `json:"clientId,omitempty"`
+	ClientKey    *string    `json:"clientKey,omitempty"`
+	Keyset       *ffiKeyset `json:"keyset,omitempty"`
+}
+
+type ffiAuthStrategy struct {
+	Type string `json:"type"`
+}
+
+type ffiNewClientOptions struct {
+	EncryptConfig EncryptConfig    `json:"encryptConfig"`
+	ClientOpts    *ffiClientOpts   `json:"clientOpts,omitempty"`
+	AuthStrategy  *ffiAuthStrategy `json:"authStrategy,omitempty"`
+	EqlVersion    int              `json:"eqlVersion"`
+}
+
 // NewClient creates a new protect client configured with the given options.
 // The ctx parameter is checked for cancellation before the FFI call.
 func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
+	const op = "NewClient"
+
 	cfg := &clientConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	encryptConfig := buildEncryptConfigFromSchemas(cfg.schemas)
-
-	type ffiKeyset struct {
-		Name *string `json:"name,omitempty"`
-		ID   *string `json:"id,omitempty"`
-	}
-	type ffiClientOpts struct {
-		WorkspaceCrn *string    `json:"workspaceCrn,omitempty"`
-		AccessKey    *string    `json:"accessKey,omitempty"`
-		ClientID     *string    `json:"clientId,omitempty"`
-		ClientKey    *string    `json:"clientKey,omitempty"`
-		Keyset       *ffiKeyset `json:"keyset,omitempty"`
-	}
-	type ffiNewClientOptions struct {
-		EncryptConfig EncryptConfig  `json:"encryptConfig"`
-		ClientOpts    *ffiClientOpts `json:"clientOpts,omitempty"`
+	// Resolve the authentication strategy. WithOIDCFederation and
+	// WithTokenProvider are mutually exclusive.
+	if cfg.oidcGetToken != nil && cfg.tokenProviderGetToken != nil {
+		return nil, &Error{
+			Op:      op,
+			Err:     ErrAuthStrategy,
+			Message: "protect: NewClient: WithOIDCFederation and WithTokenProvider are mutually exclusive",
+		}
 	}
 
 	ffiOpts := ffiNewClientOptions{
-		EncryptConfig: encryptConfig,
+		EncryptConfig: buildEncryptConfigFromSchemas(cfg.schemas),
+		ClientOpts:    buildClientOpts(cfg),
+		EqlVersion:    resolveEqlVersion(cfg.encryptedFormat),
 	}
 
-	if cfg.workspaceCRN != "" || cfg.accessKey != "" || cfg.clientID != "" || cfg.clientKey != "" || cfg.keysetName != "" || cfg.keysetID != "" {
-		co := &ffiClientOpts{}
-		if cfg.workspaceCRN != "" {
-			co.WorkspaceCrn = &cfg.workspaceCRN
+	var getToken func(ctx context.Context) (string, error)
+	switch {
+	case cfg.oidcGetToken != nil:
+		// OIDC federation requires a workspace CRN, from WithCredentials or
+		// the CS_WORKSPACE_CRN environment variable. Validate before the FFI
+		// call so the caller gets a clear, native-independent error.
+		crn := cfg.workspaceCRN
+		if crn == "" {
+			crn = os.Getenv("CS_WORKSPACE_CRN")
 		}
-		if cfg.accessKey != "" {
-			co.AccessKey = &cfg.accessKey
-		}
-		if cfg.clientID != "" {
-			co.ClientID = &cfg.clientID
-		}
-		if cfg.clientKey != "" {
-			co.ClientKey = &cfg.clientKey
-		}
-		if cfg.keysetName != "" || cfg.keysetID != "" {
-			ks := &ffiKeyset{}
-			if cfg.keysetName != "" {
-				ks.Name = &cfg.keysetName
+		if crn == "" {
+			return nil, &Error{
+				Op:      op,
+				Err:     ErrAuthStrategy,
+				Message: "protect: NewClient: WithOIDCFederation requires a workspace CRN: set it via WithCredentials or the CS_WORKSPACE_CRN environment variable (workspaceCrn is required)",
 			}
-			if cfg.keysetID != "" {
-				ks.ID = &cfg.keysetID
-			}
-			co.Keyset = ks
 		}
-		ffiOpts.ClientOpts = co
+		if ffiOpts.ClientOpts == nil {
+			ffiOpts.ClientOpts = &ffiClientOpts{}
+		}
+		if ffiOpts.ClientOpts.WorkspaceCrn == nil {
+			ffiOpts.ClientOpts.WorkspaceCrn = &crn
+		}
+		ffiOpts.AuthStrategy = &ffiAuthStrategy{Type: "oidcFederation"}
+		getToken = cfg.oidcGetToken
+	case cfg.tokenProviderGetToken != nil:
+		ffiOpts.AuthStrategy = &ffiAuthStrategy{Type: "tokenProvider"}
+		getToken = cfg.tokenProviderGetToken
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("protect: NewClient: %w", err)
+		return nil, fmt.Errorf("protect: %s: %w", op, err)
 	}
 
 	optionsJSON, err := json.Marshal(ffiOpts)
 	if err != nil {
-		return nil, fmt.Errorf("protect: NewClient: marshaling options: %w", err)
+		return nil, fmt.Errorf("protect: %s: marshaling options: %w", op, err)
 	}
 
 	cOptionsJSON := C.CString(string(optionsJSON))
 	defer C.free(unsafe.Pointer(cOptionsJSON))
 
-	result := C.protect_new_client(cOptionsJSON)
+	// When an auth strategy callback is configured, register the provider with
+	// a cgo.Handle and pass the exported Go callback to the native layer.
+	if getToken != nil {
+		handle := cgo.NewHandle(&tokenProvider{getToken: getToken})
+		result := C.protectNewClientWithToken(cOptionsJSON, C.uint64_t(handle))
+		if !result.success {
+			handle.Delete()
+			errorStr := C.GoString(result.error)
+			C.protect_free_string(result.error)
+			return nil, newError(op, errorStr)
+		}
+		return &Client{
+			ptr:         unsafe.Pointer(result.data),
+			tokenHandle: handle,
+			hasToken:    true,
+		}, nil
+	}
+
+	result := C.protectNewClientNoToken(cOptionsJSON)
 	if !result.success {
 		errorStr := C.GoString(result.error)
 		C.protect_free_string(result.error)
-		return nil, newError("NewClient", errorStr)
+		return nil, newError(op, errorStr)
 	}
 
 	return &Client{ptr: unsafe.Pointer(result.data)}, nil
+}
+
+// resolveEqlVersion maps an EncryptedFormat to its wire version, defaulting to
+// EncryptedFormatV2 when unset.
+func resolveEqlVersion(f EncryptedFormat) int {
+	if f == 0 {
+		return int(EncryptedFormatV2)
+	}
+	return int(f)
+}
+
+// fillEnvCredentials populates credential fields that were not set via
+// WithCredentials from the standard environment variables. The native layer
+// resolves workspace and access-key auth from the environment on its own, but
+// the client key pair must be supplied by the SDK: CS_CLIENT_ID and
+// CS_CLIENT_KEY are only used together — a lone half of the pair is ignored.
+func fillEnvCredentials(cfg *clientConfig) {
+	if cfg.clientID == "" && cfg.clientKey == "" {
+		id, key := os.Getenv("CS_CLIENT_ID"), os.Getenv("CS_CLIENT_KEY")
+		if id != "" && key != "" {
+			cfg.clientID = id
+			cfg.clientKey = key
+		}
+	}
+	if cfg.workspaceCRN == "" {
+		cfg.workspaceCRN = os.Getenv("CS_WORKSPACE_CRN")
+	}
+	if cfg.accessKey == "" {
+		cfg.accessKey = os.Getenv("CS_ACCESS_KEY")
+		if cfg.accessKey == "" {
+			cfg.accessKey = os.Getenv("CS_CLIENT_ACCESS_KEY")
+		}
+	}
+}
+
+// buildClientOpts assembles the optional clientOpts object, or returns nil when
+// no credential fields are configured.
+func buildClientOpts(cfg *clientConfig) *ffiClientOpts {
+	fillEnvCredentials(cfg)
+	if cfg.workspaceCRN == "" && cfg.accessKey == "" && cfg.clientID == "" &&
+		cfg.clientKey == "" && cfg.keysetName == "" && cfg.keysetID == "" {
+		return nil
+	}
+	co := &ffiClientOpts{}
+	if cfg.workspaceCRN != "" {
+		co.WorkspaceCrn = &cfg.workspaceCRN
+	}
+	if cfg.accessKey != "" {
+		co.AccessKey = &cfg.accessKey
+	}
+	if cfg.clientID != "" {
+		co.ClientID = &cfg.clientID
+	}
+	if cfg.clientKey != "" {
+		co.ClientKey = &cfg.clientKey
+	}
+	if cfg.keysetName != "" || cfg.keysetID != "" {
+		ks := &ffiKeyset{}
+		if cfg.keysetName != "" {
+			ks.Name = &cfg.keysetName
+		}
+		if cfg.keysetID != "" {
+			ks.ID = &cfg.keysetID
+		}
+		co.Keyset = ks
+	}
+	return co
 }
 
 func buildEncryptConfigFromSchemas(schemas []*TableDef) EncryptConfig {
@@ -425,7 +706,7 @@ func buildEncryptConfigFromSchemas(schemas []*TableDef) EncryptConfig {
 	for _, td := range schemas {
 		tbl := make(Table, len(td.columns))
 		for colName, col := range td.columns {
-			tbl[colName] = col
+			tbl[colName] = canonicalizeColumn(col)
 		}
 		tbls[td.name] = tbl
 	}
@@ -433,6 +714,30 @@ func buildEncryptConfigFromSchemas(schemas []*TableDef) EncryptConfig {
 		Version: 1,
 		Tables:  tbls,
 	}
+}
+
+// canonicalizeColumn returns a copy of col ready for the wire: cast_as is
+// normalized to its canonical name, and an unset ste_vec array_index_mode is
+// defaulted to "none" (the native library default differs). The input column
+// stored in the schema is left unmodified.
+func canonicalizeColumn(col Column) Column {
+	out := col
+	if col.CastAs != nil {
+		norm := normalizeCastAs(*col.CastAs)
+		out.CastAs = &norm
+	}
+	if col.Indexes != nil && col.Indexes.SteVecIndex != nil &&
+		col.Indexes.SteVecIndex.ArrayIndexMode == nil {
+		// Copy the indexes and ste_vec opts so we can inject the default
+		// without mutating the stored schema.
+		idx := *col.Indexes
+		sv := *col.Indexes.SteVecIndex
+		none := "none"
+		sv.ArrayIndexMode = &none
+		idx.SteVecIndex = &sv
+		out.Indexes = &idx
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -463,16 +768,14 @@ func (c *Client) Encrypt(ctx context.Context, col ColumnRef, plaintext any, opts
 		Column            string       `json:"column"`
 		Table             string       `json:"table"`
 		LockContext       *LockContext `json:"lockContext,omitempty"`
-		ServiceToken      *string      `json:"serviceToken,omitempty"`
 		UnverifiedContext any          `json:"unverifiedContext,omitempty"`
 	}
 
 	ffiOpts := ffiEncryptOptions{
-		Plaintext:         plaintext,
+		Plaintext:         normalizePlaintext(plaintext),
 		Column:            col.column,
 		Table:             col.table,
 		LockContext:       co.lockContext,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -528,14 +831,12 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 	type ffiDecryptOptions struct {
 		Ciphertext        *Encrypted   `json:"ciphertext"`
 		LockContext       *LockContext `json:"lockContext,omitempty"`
-		ServiceToken      *string      `json:"serviceToken,omitempty"`
 		UnverifiedContext any          `json:"unverifiedContext,omitempty"`
 	}
 
 	ffiOpts := ffiDecryptOptions{
 		Ciphertext:        encrypted,
 		LockContext:       co.lockContext,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -558,7 +859,7 @@ func (c *Client) Decrypt(ctx context.Context, encrypted *Encrypted, opts ...Opti
 	C.protect_free_string(result.data)
 
 	var plaintext any
-	if err := json.Unmarshal([]byte(plaintextJSON), &plaintext); err != nil {
+	if err := decodeFFIJSON([]byte(plaintextJSON), &plaintext); err != nil {
 		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
@@ -595,7 +896,6 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 	}
 	type ffiBulkOptions struct {
 		Plaintexts        []ffiPlaintextPayload `json:"plaintexts"`
-		ServiceToken      *string               `json:"serviceToken,omitempty"`
 		UnverifiedContext any                   `json:"unverifiedContext,omitempty"`
 	}
 
@@ -606,7 +906,7 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 			lc = co.lockContext
 		}
 		payloads[i] = ffiPlaintextPayload{
-			Plaintext:   item.Plaintext,
+			Plaintext:   normalizePlaintext(item.Plaintext),
 			Column:      item.Column.column,
 			Table:       item.Column.table,
 			LockContext: lc,
@@ -615,7 +915,6 @@ func (c *Client) EncryptBulk(ctx context.Context, items []PlaintextItem, opts ..
 
 	ffiOpts := ffiBulkOptions{
 		Plaintexts:        payloads,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -672,7 +971,6 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 	}
 	type ffiBulkDecryptOptions struct {
 		Ciphertexts       []ffiBulkDecryptPayload `json:"ciphertexts"`
-		ServiceToken      *string                 `json:"serviceToken,omitempty"`
 		UnverifiedContext any                     `json:"unverifiedContext,omitempty"`
 	}
 
@@ -686,7 +984,6 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 
 	ffiOpts := ffiBulkDecryptOptions{
 		Ciphertexts:       payloads,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -709,7 +1006,7 @@ func (c *Client) DecryptBulk(ctx context.Context, items []*Encrypted, opts ...Op
 	C.protect_free_string(result.data)
 
 	var plaintexts []any
-	if err := json.Unmarshal([]byte(plaintextJSON), &plaintexts); err != nil {
+	if err := decodeFFIJSON([]byte(plaintextJSON), &plaintexts); err != nil {
 		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
@@ -746,7 +1043,6 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 	}
 	type ffiBulkDecryptOptions struct {
 		Ciphertexts       []ffiBulkDecryptPayload `json:"ciphertexts"`
-		ServiceToken      *string                 `json:"serviceToken,omitempty"`
 		UnverifiedContext any                     `json:"unverifiedContext,omitempty"`
 	}
 
@@ -760,7 +1056,6 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 
 	ffiOpts := ffiBulkDecryptOptions{
 		Ciphertexts:       payloads,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -788,7 +1083,7 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 	}
 
 	var ffiResults []ffiDecryptResult
-	if err := json.Unmarshal([]byte(resultsJSON), &ffiResults); err != nil {
+	if err := decodeFFIJSON([]byte(resultsJSON), &ffiResults); err != nil {
 		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
@@ -808,13 +1103,14 @@ func (c *Client) DecryptBulkFallible(ctx context.Context, items []*Encrypted, op
 // EncryptQuery
 // ---------------------------------------------------------------------------
 
-// EncryptQuery encrypts a value for searching against an encrypted column.
+// EncryptQuery encrypts a value for searching against an encrypted column and
+// returns an opaque [QueryTerm] to bind into a SQL statement.
 //
-// The queryType determines which index is used for the search. For example,
-// [Equality] produces an HMAC for exact-match, [FreeTextSearch] produces a
-// bloom filter for full-text search, and [OrderAndRange] produces an ORE
-// ciphertext for range comparisons.
-func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType QueryType, plaintext any, opts ...Option) (*Encrypted, error) {
+// The queryType determines which index is used for the search: [Equality] for
+// exact-match, [FreeTextSearch] for full-text search, [OrderAndRange] for range
+// and ordering comparisons, and the JSON query types for path and containment
+// queries. The returned term should be treated as opaque; see [QueryTerm].
+func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType QueryType, plaintext any, opts ...Option) (*QueryTerm, error) {
 	const op = "EncryptQuery"
 
 	ptr, unlock, err := c.acquirePtr(op)
@@ -838,18 +1134,16 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 		IndexType         string       `json:"indexType"`
 		QueryOp           string       `json:"queryOp,omitempty"`
 		LockContext       *LockContext `json:"lockContext,omitempty"`
-		ServiceToken      *string      `json:"serviceToken,omitempty"`
 		UnverifiedContext any          `json:"unverifiedContext,omitempty"`
 	}
 
 	ffiOpts := ffiEncryptQueryOptions{
-		Plaintext:         plaintext,
+		Plaintext:         normalizePlaintext(plaintext),
 		Column:            col.column,
 		Table:             col.table,
 		IndexType:         indexType,
 		QueryOp:           queryOp,
 		LockContext:       co.lockContext,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -868,23 +1162,19 @@ func (c *Client) EncryptQuery(ctx context.Context, col ColumnRef, queryType Quer
 		return nil, newError(op, errorStr)
 	}
 
-	encryptedJSON := C.GoString(result.data)
+	termJSON := C.GoString(result.data)
 	C.protect_free_string(result.data)
 
-	var encrypted Encrypted
-	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
-		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
-	}
-
-	return &encrypted, nil
+	return &QueryTerm{raw: json.RawMessage(termJSON)}, nil
 }
 
 // ---------------------------------------------------------------------------
 // EncryptQueryBulk
 // ---------------------------------------------------------------------------
 
-// EncryptQueryBulk encrypts multiple query values in a single operation.
-func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts ...Option) ([]Encrypted, error) {
+// EncryptQueryBulk encrypts multiple query values in a single operation. Each
+// result is an opaque [QueryTerm] positioned to match its input query.
+func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts ...Option) ([]*QueryTerm, error) {
 	const op = "EncryptQueryBulk"
 
 	ptr, unlock, err := c.acquirePtr(op)
@@ -909,7 +1199,6 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 	}
 	type ffiBulkQueryOptions struct {
 		Queries           []ffiQueryPayload `json:"queries"`
-		ServiceToken      *string           `json:"serviceToken,omitempty"`
 		UnverifiedContext any               `json:"unverifiedContext,omitempty"`
 	}
 
@@ -921,7 +1210,7 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 			lc = co.lockContext
 		}
 		payloads[i] = ffiQueryPayload{
-			Plaintext:   q.Plaintext,
+			Plaintext:   normalizePlaintext(q.Plaintext),
 			Column:      q.Column.column,
 			Table:       q.Column.table,
 			IndexType:   indexType,
@@ -932,7 +1221,6 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 
 	ffiOpts := ffiBulkQueryOptions{
 		Queries:           payloads,
-		ServiceToken:      co.serviceToken,
 		UnverifiedContext: co.unverifiedContext,
 	}
 
@@ -951,22 +1239,26 @@ func (c *Client) EncryptQueryBulk(ctx context.Context, queries []QueryItem, opts
 		return nil, newError(op, errorStr)
 	}
 
-	encryptedJSON := C.GoString(result.data)
+	termsJSON := C.GoString(result.data)
 	C.protect_free_string(result.data)
 
-	var encrypted []Encrypted
-	if err := json.Unmarshal([]byte(encryptedJSON), &encrypted); err != nil {
+	var raw []json.RawMessage
+	if err := json.Unmarshal([]byte(termsJSON), &raw); err != nil {
 		return nil, fmt.Errorf("protect: %s: unmarshaling result: %w", op, err)
 	}
 
-	return encrypted, nil
+	terms := make([]*QueryTerm, len(raw))
+	for i := range raw {
+		terms[i] = &QueryTerm{raw: raw[i]}
+	}
+	return terms, nil
 }
 
 // ---------------------------------------------------------------------------
 // IsEncrypted
 // ---------------------------------------------------------------------------
 
-// IsEncrypted checks whether a value is a valid EQL encrypted payload.
+// IsEncrypted reports whether a value is a valid encrypted payload.
 // This is a standalone function that does not require a [Client].
 //
 // Note: this function makes a CGO call to validate the payload structure.
@@ -985,6 +1277,32 @@ func IsEncrypted(value any) bool {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// normalizePlaintext converts Go values that need explicit wire formatting
+// before encryption. time.Time values are formatted as RFC 3339 strings so the
+// native layer can parse them for date and timestamp columns. A nil *time.Time
+// becomes a JSON null. All other values pass through unchanged.
+func normalizePlaintext(v any) any {
+	switch t := v.(type) {
+	case time.Time:
+		return t.Format(time.RFC3339Nano)
+	case *time.Time:
+		if t == nil {
+			return nil
+		}
+		return t.Format(time.RFC3339Nano)
+	default:
+		return v
+	}
+}
+
+// decodeFFIJSON decodes an FFI JSON response into v using json.Number for
+// numeric values, so integers beyond 2^53 survive without precision loss.
+func decodeFFIJSON(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
 
 // resolveQueryType maps a public QueryType to the FFI's indexType and queryOp
 // string values. For standard index types (unique, match, ore), queryOp is

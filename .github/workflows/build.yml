@@ -84,6 +84,12 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             libc: glibc
 
+          # Linux arm64 glibc (for Debian/Ubuntu/CentOS)
+          - platform: linux-arm64-gnu
+            os: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            libc: glibc
+
           # Linux arm64 musl (for Alpine and static linking)
           - platform: linux-arm64-musl
             os: ubuntu-22.04-arm
@@ -126,7 +132,7 @@ jobs:
         if: contains(matrix.rust_target, 'musl') && startsWith(matrix.os, 'ubuntu')
         run: |
           mkdir -p .cargo
-          echo '[target.x86_64-unknown-linux-musl]' >> .cargo/config.toml
+          echo '[target.${{ matrix.rust_target }}]' >> .cargo/config.toml
           echo 'rustflags = ["-C", "target-feature=+crt-static"]' >> .cargo/config.toml
 
       - name: Build library
@@ -164,6 +170,39 @@ jobs:
           name: library-${{ matrix.platform }}
           path: pkg/protect/libprotect_ffi_*.a
           retention-days: 30
+
+  # Run Go unit tests against the freshly built native libraries
+  test-go:
+    name: Go Tests (${{ matrix.platform }})
+    needs: [build-native-libraries]
+    if: always() && needs.build-native-libraries.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-14
+          - platform: linux-x64-gnu
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download library artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: library-${{ matrix.platform }}
+          path: pkg/protect
+
+      - name: Run Go tests
+        run: go test ./pkg/protect/...
 
   # Commit all generated libraries at once
   commit-artifacts:

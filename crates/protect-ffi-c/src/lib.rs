@@ -3,28 +3,36 @@
 // function `unsafe` would change the C header signature, which is undesirable.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-mod encrypt_config;
+mod auth;
+mod eql_v3;
 mod go_plaintext;
 
+use auth::{
+    AuthStrategyType, GoAuthStrategy, GoOidcProvider, GoProvidedTokenStrategy, GoTokenCallback,
+    ProtectTokenFn,
+};
 use cipherstash_client::{
-    credentials::ServiceToken,
     encryption::{EncryptionError, Plaintext, QueryOp, ScopedCipher, TypeParseError},
     eql::{
-        encrypt_eql, EqlCiphertext, EqlEncryptOpts, EqlError, EqlOperation,
+        encrypt_eql, EqlCiphertext, EqlEncryptOpts, EqlError, EqlOperation, EqlOutput,
         Identifier as EqlIdentifier, PreparedPlaintext,
     },
     schema::{
         column::{Index, IndexType},
-        ColumnConfig,
+        errors::ConfigError,
+        CanonicalEncryptionConfig, ColumnConfig, Identifier,
     },
     zerokms::{
-        self, FallbackKeyProvider, RecordDecryptError, SecretKey, WithContext, ZeroKMSBuilder,
-        ZeroKMSBuilderError, ZeroKMSWithClientKey,
+        self, FallbackKeyProvider, RecordDecryptError, SecretKey, WithContext,
+        ZeroKMSBuilder, ZeroKMSBuilderError, ZeroKMSWithClientKey,
     },
     AuthError, AutoStrategy, IdentifiedBy, UnverifiedContext,
 };
 use cts_common::Crn;
-use encrypt_config::{EncryptConfig, Identifier};
+use eql_v3::{
+    encrypted_record_from_value, is_encrypted_value, query_output, storage_output,
+    validate_eql_version, EncryptedOutput, EqlVersion, QueryOutput,
+};
 use go_plaintext::GoPlaintext;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -62,23 +70,17 @@ impl Default for CResult {
 // Client
 // ---------------------------------------------------------------------------
 
-type ScopedZeroKMS = ScopedCipher<AutoStrategy>;
+type ScopedZeroKMS = ScopedCipher<GoAuthStrategy>;
 
 /// Opaque client handle passed across the FFI boundary.
-#[derive(Clone)]
 pub struct Client {
     cipher: Arc<ScopedZeroKMS>,
-    zerokms: Arc<ZeroKMSWithClientKey<AutoStrategy>>,
+    zerokms: Arc<ZeroKMSWithClientKey<GoAuthStrategy>>,
     encrypt_config: Arc<HashMap<Identifier, ColumnConfig>>,
+    /// EQL wire version this client emits. Decryption accepts both formats
+    /// regardless of this setting.
+    eql_version: EqlVersion,
 }
-
-/// Re-export EqlCiphertext as Encrypted for backward compatibility.
-///
-/// This is a unified structure that contains the identifier, version, and the encrypted body
-/// with all associated cryptographic searchable encrypted metadata (SEM).
-///
-/// Note: The ciphertext field (c) is serialized in MessagePack Base85 format.
-pub type Encrypted = EqlCiphertext;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -241,8 +243,8 @@ impl std::fmt::Display for JsonPathHint {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("Credential error: {0}")]
+    Credentials(String),
     #[error(transparent)]
     ZeroKMSBuilder(#[from] ZeroKMSBuilderError),
     #[error(transparent)]
@@ -286,12 +288,26 @@ pub enum Error {
         reason: JsonPathReason,
         hint: JsonPathHint,
     },
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     #[error("Configuration error for column '{table}.{column}': ste_vec index requires cast_as: 'json', but found cast_as: '{found_cast_as}'. Either change cast_as to 'json' or remove the ste_vec index.")]
     SteVecRequiresJsonCastAs {
         table: String,
         column: String,
         found_cast_as: String,
     },
+    #[error("invalid eqlVersion {0}: expected 2 or 3")]
+    InvalidEqlVersion(u8),
+    #[error("Column '{column}' has no EQL v3 column type: {reason}. {hint}")]
+    NoV3Domain {
+        column: String,
+        reason: String,
+        hint: String,
+    },
+    #[error("EQL v3 conversion failed: {0}")]
+    FromV2(#[from] eql_bindings::from_v2::FromV2Error),
+    #[error("invalid ciphertext: {0}")]
+    InvalidCiphertext(#[from] zerokms::DecryptError),
     #[error("null pointer error")]
     NullPointer,
     #[error("utf8 conversion error")]
@@ -334,7 +350,7 @@ impl CredentialOpts {
         match (self.client_id.as_ref(), self.client_key.as_ref()) {
             (Some(id), Some(key)) => SecretKey::from_hex(id.clone(), key.clone())
                 .map(Some)
-                .map_err(|e| Error::Config(e.to_string())),
+                .map_err(|e| Error::Credentials(e.to_string())),
             _ => Ok(None),
         }
     }
@@ -362,8 +378,11 @@ struct ClientOpts {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NewClientOptions {
-    encrypt_config: EncryptConfig,
+    encrypt_config: CanonicalEncryptionConfig,
     client_opts: Option<ClientOpts>,
+    auth_strategy: Option<auth::AuthStrategyOpts>,
+    /// EQL wire version to emit: 2 (default) or 3. Validated before any I/O.
+    eql_version: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +403,6 @@ struct EncryptOptions {
     column: String,
     table: String,
     lock_context: Option<LockContext>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
@@ -392,7 +410,6 @@ struct EncryptOptions {
 #[serde(rename_all = "camelCase")]
 struct EncryptBulkOptions {
     plaintexts: Vec<PlaintextPayload>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
@@ -414,13 +431,12 @@ struct EncryptQueryOptions {
     plaintext: GoPlaintext,
     column: String,
     table: String,
-    /// The index type to use: "ste_vec", "match", "ore", "unique"
+    /// The index type to use: "ste_vec", "match", "ore", "ope", "unique"
     index_type: String,
     /// The query operation: "default", "ste_vec_selector", "ste_vec_term"
     #[serde(default = "default_query_op")]
     query_op: String,
     lock_context: Option<LockContext>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
@@ -433,7 +449,6 @@ fn default_query_op() -> String {
 #[serde(rename_all = "camelCase")]
 struct EncryptQueryBulkOptions {
     queries: Vec<QueryPayload>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
@@ -453,9 +468,10 @@ struct QueryPayload {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DecryptOptions {
-    ciphertext: Encrypted,
+    /// Raw JSON payload — parsed internally so decrypt accepts BOTH the v2 and
+    /// v3 wire formats regardless of the client's `eqlVersion`.
+    ciphertext: serde_json::Value,
     lock_context: Option<LockContext>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
@@ -463,14 +479,14 @@ struct DecryptOptions {
 #[serde(rename_all = "camelCase")]
 struct DecryptBulkOptions {
     ciphertexts: Vec<BulkDecryptPayload>,
-    service_token: Option<ServiceToken>,
     unverified_context: Option<UnverifiedContext>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkDecryptPayload {
-    ciphertext: Encrypted,
+    /// Raw JSON payload — see [`DecryptOptions::ciphertext`].
+    ciphertext: serde_json::Value,
     lock_context: Option<LockContext>,
 }
 
@@ -567,6 +583,7 @@ fn index_type_description(index_type: &str) -> &'static str {
     match index_type {
         "ste_vec" => "JSON path and containment queries",
         "ore" => "range comparisons (<, >, <=, >=)",
+        "ope" => "range comparisons (<, >, <=, >=)",
         "match" => "full-text search queries",
         "unique" => "exact match queries",
         _ => "unknown query type",
@@ -582,6 +599,7 @@ fn format_available_indexes(column_config: &ColumnConfig) -> String {
             IndexType::SteVec { .. } => "ste_vec",
             IndexType::Match { .. } => "match",
             IndexType::Ore => "ore",
+            IndexType::Ope => "ope",
             IndexType::Unique { .. } => "unique",
         })
         .collect();
@@ -608,6 +626,7 @@ fn find_index_for_type<'a>(
                 (IndexType::SteVec { .. }, "ste_vec")
                     | (IndexType::Match { .. }, "match")
                     | (IndexType::Ore, "ore")
+                    | (IndexType::Ope, "ope")
                     | (IndexType::Unique { .. }, "unique")
             )
         })
@@ -636,54 +655,49 @@ fn parse_query_op(query_op: &str) -> Result<QueryOp, Error> {
 }
 
 /// Inferred operation mode for query encryption.
-///
-/// This determines which EqlOperation to use:
-/// - QueryMode: Use EqlOperation::Query (standard query encryption)
-/// - StoreMode: Use EqlOperation::Store (for containment queries that need sv array)
 #[derive(Debug, Clone, Copy)]
 enum InferredQueryMode {
     /// Use EqlOperation::Query with the given QueryOp
     QueryMode(QueryOp),
-    /// Use EqlOperation::Store (for JSON containment queries on ste_vec)
+    /// Use EqlOperation::Store (for JSON containment queries on ste_vec, and for
+    /// v3 scalar Default queries whose operand must carry every domain term)
     StoreMode,
 }
 
 /// Convert GoPlaintext to Plaintext and infer the appropriate operation mode.
-///
-/// Returns both the converted Plaintext and the inferred operation mode.
 ///
 /// Query mode has different type semantics than storage mode:
 /// - SteVecSelector: Always string (JSON path like "$.user.email") -> QueryMode
 /// - SteVecTerm: Always JSON (fragment to match with @>) -> StoreMode (produces sv array)
 /// - Default: For SteVec indexes, infers from plaintext type:
 ///   - String -> QueryMode with SteVecSelector (path queries)
-///   - JsonB (Object/Array) -> StoreMode (containment queries need sv array)
-///   - Other indexes use column's cast_type and QueryMode with Default
+///   - Json (Object/Array) -> StoreMode (containment queries need sv array)
+///   - Other indexes use column's cast_type; QueryMode with Default under
+///     eqlVersion 2, StoreMode under eqlVersion 3 (the v3 scalar query operand
+///     must carry ALL the column domain's terms, generated exactly as storage
+///     encryption generates them and hoisted by query_output).
 fn to_query_plaintext(
     go_plaintext: &GoPlaintext,
     query_op: QueryOp,
     index_type: &IndexType,
     column_type: cipherstash_client::schema::column::ColumnType,
+    eql_version: EqlVersion,
 ) -> Result<(Plaintext, InferredQueryMode), Error> {
     use cipherstash_client::schema::column::ColumnType;
 
     match query_op {
         QueryOp::SteVecSelector => {
-            // Selector queries expect a string path like "$.user.email"
-            // Validate the path if we have a string
             if let GoPlaintext::String(path) = go_plaintext {
                 validate_json_path(path)?;
             }
-            // Force Utf8Str conversion regardless of column type
-            let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Utf8Str)?;
+            // Force Text conversion regardless of column type
+            let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Text)?;
             Ok((
                 plaintext,
                 InferredQueryMode::QueryMode(QueryOp::SteVecSelector),
             ))
         }
         QueryOp::SteVecTerm => {
-            // Term queries expect a JSON fragment to match with @>
-            // Provide helpful errors for wrong types
             match go_plaintext {
                 GoPlaintext::String(s) => {
                     return Err(Error::InvalidQueryInput {
@@ -696,7 +710,7 @@ fn to_query_plaintext(
                 GoPlaintext::Number(n) => {
                     return Err(Error::InvalidQueryInput {
                         query_op: QueryOpKind::SteVecTerm,
-                        received: ReceivedKind::Number(*n),
+                        received: ReceivedKind::Number(n.as_f64().unwrap_or(f64::NAN)),
                         expected: ExpectedKind::JsonObjectOrArray,
                         hint: QueryInputHint::WrapNumberInObject,
                     });
@@ -710,35 +724,30 @@ fn to_query_plaintext(
                     });
                 }
                 GoPlaintext::JsonB(_) => {
-                    // This is the expected type - proceed
+                    // Expected type - proceed
                 }
             }
-            // Use Store mode to produce sv array for containment matching
-            let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::JsonB)?;
+            let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Json)?;
             Ok((plaintext, InferredQueryMode::StoreMode))
         }
         QueryOp::Default => {
-            // For SteVec indexes with Default queryOp, infer from plaintext type
             if matches!(index_type, IndexType::SteVec { .. }) {
                 match go_plaintext {
                     GoPlaintext::String(path) => {
-                        // String -> selector (path queries like "$.user.email")
                         validate_json_path(path)?;
-                        let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Utf8Str)?;
+                        let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Text)?;
                         Ok((
                             plaintext,
                             InferredQueryMode::QueryMode(QueryOp::SteVecSelector),
                         ))
                     }
                     GoPlaintext::JsonB(_) => {
-                        // Object/Array -> Store mode for containment queries
-                        // This produces sv array needed for @> operator matching
-                        let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::JsonB)?;
+                        let plaintext = go_plaintext.to_plaintext_with_type(ColumnType::Json)?;
                         Ok((plaintext, InferredQueryMode::StoreMode))
                     }
                     GoPlaintext::Number(n) => Err(Error::InvalidQueryInput {
                         query_op: QueryOpKind::SteVecDefault,
-                        received: ReceivedKind::Number(*n),
+                        received: ReceivedKind::Number(n.as_f64().unwrap_or(f64::NAN)),
                         expected: ExpectedKind::StringPathOrJsonObjectOrArray,
                         hint: QueryInputHint::UsePathOrObject,
                     }),
@@ -750,23 +759,106 @@ fn to_query_plaintext(
                     }),
                 }
             } else {
-                // Non-SteVec indexes: use column's storage type (original behavior)
                 let plaintext = go_plaintext.to_plaintext_with_type(column_type)?;
-                Ok((plaintext, InferredQueryMode::QueryMode(QueryOp::Default)))
+                let mode = match eql_version {
+                    EqlVersion::V2 => InferredQueryMode::QueryMode(QueryOp::Default),
+                    // v3 scalar operands need every term of the column's domain,
+                    // so run Store mode and let query_output hoist them.
+                    EqlVersion::V3 => InferredQueryMode::StoreMode,
+                };
+                Ok((plaintext, mode))
             }
         }
     }
+}
+
+/// Resolve a query payload's column config and build its [`PreparedPlaintext`].
+///
+/// The single seam shared by both encrypt-query entry points, so the
+/// version-dependent mode logic can never diverge. Returns the resolved
+/// `&ColumnConfig` alongside the prepared plaintext — the caller needs it again
+/// for [`query_output`].
+fn prepare_query_plaintext<'a>(
+    encrypt_config: &'a HashMap<Identifier, ColumnConfig>,
+    table: &str,
+    column: &str,
+    go_plaintext: &GoPlaintext,
+    index_type_name: &str,
+    query_op_name: &str,
+    eql_version: EqlVersion,
+) -> Result<(PreparedPlaintext<'a>, &'a ColumnConfig), Error> {
+    let ident = Identifier::new(table.to_string(), column.to_string());
+    let column_config = encrypt_config
+        .get(&ident)
+        .ok_or(Error::UnknownColumn(ident))?;
+
+    let index = find_index_for_type(column_config, column, index_type_name)?;
+    let query_op = parse_query_op(query_op_name)?;
+
+    let (plaintext, inferred_mode) = to_query_plaintext(
+        go_plaintext,
+        query_op,
+        &index.index_type,
+        column_config.cast_type,
+        eql_version,
+    )?;
+
+    let eql_operation = match inferred_mode {
+        InferredQueryMode::QueryMode(qop) => EqlOperation::Query(&index.index_type, qop),
+        InferredQueryMode::StoreMode => EqlOperation::Store,
+    };
+
+    Ok((
+        PreparedPlaintext::new(
+            Cow::Borrowed(column_config),
+            EqlIdentifier::new(table, column),
+            plaintext,
+            eql_operation,
+        ),
+        column_config,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Core async implementations
 // ---------------------------------------------------------------------------
 
-async fn new_client_impl(opts: NewClientOptions) -> Result<Client, Error> {
+async fn new_client_impl(
+    opts: NewClientOptions,
+    callback: Option<GoTokenCallback>,
+) -> Result<Client, Error> {
+    // Validate before any network I/O: a bad eqlVersion fails fast.
+    let eql_version = validate_eql_version(opts.eql_version)?;
     let client_opts = opts.client_opts.unwrap_or_default();
 
-    let strategy = client_opts.creds.build_strategy()?;
-    let zerokms = ZeroKMSBuilder::new(strategy)
+    let auth = match opts.auth_strategy {
+        None => GoAuthStrategy::Auto(Box::new(client_opts.creds.build_strategy()?)),
+        Some(strat) => {
+            let cb = callback.ok_or_else(|| {
+                Error::Credentials("auth strategy requires a token callback".to_string())
+            })?;
+            match strat.strategy_type {
+                AuthStrategyType::OidcFederation => {
+                    let crn = client_opts.creds.workspace_crn.clone().ok_or_else(|| {
+                        Error::Credentials(
+                            "workspaceCrn is required for the oidcFederation auth strategy"
+                                .to_string(),
+                        )
+                    })?;
+                    let strategy =
+                        stack_auth::OidcFederationStrategy::builder(crn, GoOidcProvider::new(cb))
+                            .maybe_base_url(strat.base_url)?
+                            .build()?;
+                    GoAuthStrategy::Oidc(Box::new(strategy))
+                }
+                AuthStrategyType::TokenProvider => {
+                    GoAuthStrategy::Provided(GoProvidedTokenStrategy::new(cb))
+                }
+            }
+        }
+    };
+
+    let zerokms = ZeroKMSBuilder::new(auth)
         .with_key_provider(client_opts.creds.build_key_provider()?)
         .build()
         .await?;
@@ -774,16 +866,39 @@ async fn new_client_impl(opts: NewClientOptions) -> Result<Client, Error> {
     let zerokms = Arc::new(zerokms);
     let cipher = ScopedZeroKMS::init(zerokms.clone(), client_opts.keyset).await?;
 
-    let client = Client {
+    Ok(Client {
         cipher: Arc::new(cipher),
         zerokms,
-        encrypt_config: Arc::new(opts.encrypt_config.into_config_map()?),
-    };
-
-    Ok(client)
+        encrypt_config: Arc::new(build_config_map(opts.encrypt_config)?),
+        eql_version,
+    })
 }
 
-async fn encrypt_impl(client: &Client, opts: EncryptOptions) -> Result<Encrypted, Error> {
+/// Turn the canonical config into the per-column map.
+///
+/// `ConfigError::SteVecRequiresJson` is remapped to
+/// [`Error::SteVecRequiresJsonCastAs`] so its Display keeps the
+/// `ste_vec index requires cast_as` substring the Go side matches on (upstream
+/// phrases it as `requires plaintext_type: json`). Every other config error
+/// passes through transparently.
+fn build_config_map(
+    config: CanonicalEncryptionConfig,
+) -> Result<HashMap<Identifier, ColumnConfig>, Error> {
+    config.into_config_map().map_err(|e| match e {
+        ConfigError::SteVecRequiresJson {
+            table,
+            column,
+            found_plaintext_type,
+        } => Error::SteVecRequiresJsonCastAs {
+            table,
+            column,
+            found_cast_as: found_plaintext_type,
+        },
+        other => Error::Config(other),
+    })
+}
+
+async fn encrypt_impl(client: &Client, opts: EncryptOptions) -> Result<EncryptedOutput, Error> {
     let ident = Identifier::new(opts.table.clone(), opts.column.clone());
 
     let column_config = client
@@ -806,21 +921,23 @@ async fn encrypt_impl(client: &Client, opts: EncryptOptions) -> Result<Encrypted
     let eql_opts = EqlEncryptOpts {
         keyset_id: None,
         lock_context: Cow::Owned(opts.lock_context.map(Into::into).unwrap_or_default()),
-        service_token: opts.service_token.map(Cow::Owned),
         unverified_context: opts.unverified_context.map(Cow::Owned),
         index_types: None,
+        decryption_policy: None,
     };
 
     let mut encrypted = encrypt_eql(client.cipher.clone(), vec![prepared], &eql_opts).await?;
-    Ok(encrypted.remove(0))
+    let eql_ciphertext = into_store_ciphertext(encrypted.remove(0))?;
+
+    storage_output(eql_ciphertext, client.eql_version, column_config)
 }
 
 async fn encrypt_bulk_impl(
     client: &Client,
     opts: EncryptBulkOptions,
-) -> Result<Vec<Encrypted>, Error> {
-    // Group payloads by lock_context for batch processing
-    // BTreeMap provides deterministic ordering of groups
+) -> Result<Vec<EncryptedOutput>, Error> {
+    // Group payloads by lock_context for batch processing.
+    // BTreeMap provides deterministic ordering of groups.
     let mut groups: BTreeMap<Vec<String>, Vec<(usize, PlaintextPayload)>> = BTreeMap::new();
 
     for (idx, payload) in opts.plaintexts.into_iter().enumerate() {
@@ -832,18 +949,15 @@ async fn encrypt_bulk_impl(
         groups.entry(key).or_default().push((idx, payload));
     }
 
-    // Pre-allocate results vector
     let total_count: usize = groups.values().map(|g| g.len()).sum();
-    let mut results: Vec<Option<EqlCiphertext>> = (0..total_count).map(|_| None).collect();
+    let mut results: Vec<Option<EncryptedOutput>> = (0..total_count).map(|_| None).collect();
 
-    // Process each lock_context group
     for (lock_context_claims, payloads) in groups {
         let lock_context: Vec<zerokms::Context> = lock_context_claims
             .into_iter()
             .map(zerokms::Context::IdentityClaim)
             .collect();
 
-        // Build PreparedPlaintext items for this group
         let mut prepared_plaintexts = Vec::with_capacity(payloads.len());
         let mut payload_data: Vec<(usize, Identifier)> = Vec::with_capacity(payloads.len());
 
@@ -874,20 +988,26 @@ async fn encrypt_bulk_impl(
         let eql_opts = EqlEncryptOpts {
             keyset_id: None,
             lock_context: Cow::Owned(lock_context),
-            service_token: opts.service_token.as_ref().map(Cow::Borrowed),
             unverified_context: opts.unverified_context.as_ref().map(Cow::Borrowed),
             index_types: None,
+            decryption_policy: None,
         };
 
         let encrypted = encrypt_eql(client.cipher.clone(), prepared_plaintexts, &eql_opts).await?;
 
-        // Place results back in original order
-        for (eql_ciphertext, (original_idx, _ident)) in encrypted.into_iter().zip(payload_data) {
-            results[original_idx] = Some(eql_ciphertext);
+        for (eql_output, (original_idx, ident)) in encrypted.into_iter().zip(payload_data) {
+            let column_config = client
+                .encrypt_config
+                .get(&ident)
+                .ok_or_else(|| Error::UnknownColumn(ident.clone()))?;
+            results[original_idx] = Some(storage_output(
+                into_store_ciphertext(eql_output)?,
+                client.eql_version,
+                column_config,
+            )?);
         }
     }
 
-    // Unwrap all results (all should be Some)
     results
         .into_iter()
         .enumerate()
@@ -902,57 +1022,35 @@ async fn encrypt_bulk_impl(
 async fn encrypt_query_impl(
     client: &Client,
     opts: EncryptQueryOptions,
-) -> Result<EqlCiphertext, Error> {
-    let ident = Identifier::new(opts.table.clone(), opts.column.clone());
-
-    let column_config = client
-        .encrypt_config
-        .get(&ident)
-        .ok_or_else(|| Error::UnknownColumn(ident.clone()))?;
-
-    // Find the requested index type from column config
-    let index = find_index_for_type(column_config, &opts.column, &opts.index_type)?;
-    let query_op = parse_query_op(&opts.query_op)?;
-
-    // Infer type and operation mode from plaintext
-    let (plaintext, inferred_mode) = to_query_plaintext(
+) -> Result<QueryOutput, Error> {
+    let (prepared, column_config) = prepare_query_plaintext(
+        &client.encrypt_config,
+        &opts.table,
+        &opts.column,
         &opts.plaintext,
-        query_op,
-        &index.index_type,
-        column_config.cast_type,
+        &opts.index_type,
+        &opts.query_op,
+        client.eql_version,
     )?;
-
-    // Select the appropriate EqlOperation based on inferred mode
-    let eql_operation = match inferred_mode {
-        InferredQueryMode::QueryMode(qop) => EqlOperation::Query(&index.index_type, qop),
-        InferredQueryMode::StoreMode => EqlOperation::Store,
-    };
-
-    let eql_ident = EqlIdentifier::new(&opts.table, &opts.column);
-    let prepared = PreparedPlaintext::new(
-        Cow::Borrowed(column_config),
-        eql_ident,
-        plaintext,
-        eql_operation,
-    );
 
     let eql_opts = EqlEncryptOpts {
         keyset_id: None,
         lock_context: Cow::Owned(opts.lock_context.map(Into::into).unwrap_or_default()),
-        service_token: opts.service_token.map(Cow::Owned),
         unverified_context: opts.unverified_context.map(Cow::Owned),
         index_types: None,
+        decryption_policy: None,
     };
 
     let mut encrypted = encrypt_eql(client.cipher.clone(), vec![prepared], &eql_opts).await?;
-    Ok(encrypted.remove(0))
+    let eql_output = encrypted.remove(0);
+
+    query_output(eql_output, client.eql_version, column_config)
 }
 
 async fn encrypt_query_bulk_impl(
     client: &Client,
     opts: EncryptQueryBulkOptions,
-) -> Result<Vec<EqlCiphertext>, Error> {
-    // Group payloads by lock_context (same pattern as encrypt_bulk)
+) -> Result<Vec<QueryOutput>, Error> {
     let mut groups: BTreeMap<Vec<String>, Vec<(usize, QueryPayload)>> = BTreeMap::new();
 
     for (idx, payload) in opts.queries.into_iter().enumerate() {
@@ -965,7 +1063,7 @@ async fn encrypt_query_bulk_impl(
     }
 
     let total_count: usize = groups.values().map(|g| g.len()).sum();
-    let mut results: Vec<Option<EqlCiphertext>> = (0..total_count).map(|_| None).collect();
+    let mut results: Vec<Option<QueryOutput>> = (0..total_count).map(|_| None).collect();
 
     for (lock_context_claims, payloads) in groups {
         let lock_context: Vec<zerokms::Context> = lock_context_claims
@@ -974,54 +1072,36 @@ async fn encrypt_query_bulk_impl(
             .collect();
 
         let mut prepared_plaintexts = Vec::with_capacity(payloads.len());
-        let mut original_indices = Vec::with_capacity(payloads.len());
+        let mut payload_data: Vec<(usize, &ColumnConfig)> = Vec::with_capacity(payloads.len());
 
-        for (original_idx, payload) in payloads {
-            let ident = Identifier::new(payload.table.clone(), payload.column.clone());
-            let column_config = client
-                .encrypt_config
-                .get(&ident)
-                .ok_or_else(|| Error::UnknownColumn(ident.clone()))?;
-
-            let index = find_index_for_type(column_config, &payload.column, &payload.index_type)?;
-            let query_op = parse_query_op(&payload.query_op)?;
-
-            let (plaintext, inferred_mode) = to_query_plaintext(
+        for (original_idx, payload) in &payloads {
+            let (prepared, column_config) = prepare_query_plaintext(
+                &client.encrypt_config,
+                &payload.table,
+                &payload.column,
                 &payload.plaintext,
-                query_op,
-                &index.index_type,
-                column_config.cast_type,
+                &payload.index_type,
+                &payload.query_op,
+                client.eql_version,
             )?;
 
-            let eql_operation = match inferred_mode {
-                InferredQueryMode::QueryMode(qop) => EqlOperation::Query(&index.index_type, qop),
-                InferredQueryMode::StoreMode => EqlOperation::Store,
-            };
-
-            let eql_ident = EqlIdentifier::new(&payload.table, &payload.column);
-            let prepared = PreparedPlaintext::new(
-                Cow::Borrowed(column_config),
-                eql_ident,
-                plaintext,
-                eql_operation,
-            );
-
             prepared_plaintexts.push(prepared);
-            original_indices.push(original_idx);
+            payload_data.push((*original_idx, column_config));
         }
 
         let eql_opts = EqlEncryptOpts {
             keyset_id: None,
             lock_context: Cow::Owned(lock_context),
-            service_token: opts.service_token.as_ref().map(Cow::Borrowed),
             unverified_context: opts.unverified_context.as_ref().map(Cow::Borrowed),
             index_types: None,
+            decryption_policy: None,
         };
 
         let encrypted = encrypt_eql(client.cipher.clone(), prepared_plaintexts, &eql_opts).await?;
 
-        for (eql_ciphertext, original_idx) in encrypted.into_iter().zip(original_indices) {
-            results[original_idx] = Some(eql_ciphertext);
+        for (eql_output, (original_idx, column_config)) in encrypted.into_iter().zip(payload_data) {
+            results[original_idx] =
+                Some(query_output(eql_output, client.eql_version, column_config)?);
         }
     }
 
@@ -1038,16 +1118,11 @@ async fn encrypt_query_bulk_impl(
 
 async fn decrypt_impl(client: &Client, opts: DecryptOptions) -> Result<GoPlaintext, Error> {
     let lock_context = opts.lock_context.map(Into::into).unwrap_or_default();
-    let encrypted_record = encrypted_record_from_mp_base85(opts.ciphertext, lock_context)?;
+    let encrypted_record = encrypted_record_from_value(opts.ciphertext, lock_context)?;
 
     let plaintext = client
         .zerokms
-        .decrypt_single(
-            encrypted_record,
-            None,
-            opts.service_token.map(Cow::Owned),
-            opts.unverified_context.as_ref(),
-        )
+        .decrypt_single(encrypted_record, None, opts.unverified_context.as_ref())
         .await
         .map_err(Error::from)
         .and_then(|bytes| Plaintext::from_slice(bytes.as_slice()).map_err(Error::from))?;
@@ -1059,30 +1134,18 @@ async fn decrypt_bulk_impl(
     client: &Client,
     opts: DecryptBulkOptions,
 ) -> Result<Vec<GoPlaintext>, Error> {
-    let ciphertexts: Vec<(Encrypted, Vec<zerokms::Context>)> = opts
+    let encrypted_records: Vec<WithContext<'static>> = opts
         .ciphertexts
         .into_iter()
         .map(|payload| {
             let lock_context = payload.lock_context.map(Into::into).unwrap_or_default();
-            (payload.ciphertext, lock_context)
-        })
-        .collect();
-
-    let encrypted_records: Vec<WithContext<'static>> = ciphertexts
-        .into_iter()
-        .map(|(ciphertext, encryption_context)| {
-            encrypted_record_from_mp_base85(ciphertext, encryption_context)
+            encrypted_record_from_value(payload.ciphertext, lock_context)
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
     let decrypted = client
         .zerokms
-        .decrypt(
-            encrypted_records,
-            None,
-            opts.service_token.map(Cow::Owned),
-            opts.unverified_context.as_ref(),
-        )
+        .decrypt(encrypted_records, None, opts.unverified_context.as_ref())
         .await?;
 
     let plaintexts = decrypted
@@ -1097,66 +1160,95 @@ async fn decrypt_bulk_fallible_impl(
     client: &Client,
     opts: DecryptBulkOptions,
 ) -> Result<Vec<DecryptResult>, Error> {
-    let ciphertexts: Vec<(Encrypted, Vec<zerokms::Context>)> = opts
+    // Decode each ciphertext independently so a single invalid payload turns
+    // into a per-item error rather than aborting the whole batch.
+    let parsed: Vec<Result<WithContext<'static>, Error>> = opts
         .ciphertexts
         .into_iter()
         .map(|payload| {
             let lock_context = payload.lock_context.map(Into::into).unwrap_or_default();
-            (payload.ciphertext, lock_context)
+            encrypted_record_from_value(payload.ciphertext, lock_context)
         })
         .collect();
 
-    let encrypted_records: Vec<WithContext<'static>> = ciphertexts
-        .into_iter()
-        .map(|(ciphertext, encryption_context)| {
-            encrypted_record_from_mp_base85(ciphertext, encryption_context)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let mut results: Vec<Option<DecryptResult>> = (0..parsed.len()).map(|_| None).collect();
+    let mut valid_records: Vec<WithContext<'static>> = Vec::with_capacity(parsed.len());
+    let mut valid_indices: Vec<usize> = Vec::with_capacity(parsed.len());
+
+    for (idx, item) in parsed.into_iter().enumerate() {
+        match item {
+            Ok(record) => {
+                valid_records.push(record);
+                valid_indices.push(idx);
+            }
+            Err(e) => {
+                results[idx] = Some(DecryptResult::Error {
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
 
     let decrypted: Vec<Result<Vec<u8>, RecordDecryptError>> = client
         .zerokms
-        .decrypt_fallible(
-            encrypted_records,
-            opts.service_token.map(Cow::Owned),
-            opts.unverified_context.map(Cow::Owned),
-        )
+        .decrypt_fallible(valid_records, opts.unverified_context.map(Cow::Owned))
         .await?;
 
-    let plaintexts: Vec<Result<GoPlaintext, Error>> = decrypted
+    for (item, idx) in decrypted.into_iter().zip(valid_indices) {
+        results[idx] = Some(match item {
+            Ok(bytes) => match Plaintext::from_slice(&bytes)
+                .map_err(Error::from)
+                .and_then(|p| GoPlaintext::try_from(p).map_err(Error::from))
+            {
+                Ok(data) => DecryptResult::Success { data },
+                Err(e) => DecryptResult::Error {
+                    error: e.to_string(),
+                },
+            },
+            Err(e) => DecryptResult::Error {
+                error: e.to_string(),
+            },
+        });
+    }
+
+    results
         .into_iter()
-        .map(|item: Result<Vec<u8>, RecordDecryptError>| {
-            item.map_err(Error::from).and_then(|bytes| {
-                Plaintext::from_slice(&bytes)
-                    .map_err(Error::from)
-                    .and_then(|e| GoPlaintext::try_from(e).map_err(Error::from))
+        .enumerate()
+        .map(|(i, opt)| {
+            opt.ok_or_else(|| {
+                Error::InvariantViolation(format!("missing decrypt_fallible result at index {i}"))
             })
         })
-        .collect();
-
-    let results = plaintexts
-        .into_iter()
-        .map(|result| match result {
-            Ok(data) => DecryptResult::Success { data },
-            Err(err) => DecryptResult::Error {
-                error: err.to_string(),
-            },
-        })
-        .collect();
-
-    Ok(results)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 // ---------------------------------------------------------------------------
 // Crypto helpers
 // ---------------------------------------------------------------------------
 
-fn encrypted_record_from_mp_base85(
+/// Decode a v2 [`EqlCiphertext`] into the record + lock-context pair zerokms
+/// decrypts.
+///
+/// The SteVec root ciphertext is always `sv[0]` (mirrors upstream
+/// `SteVec::into_root_ciphertext`, which is not exposed on the wire type).
+/// Shared with [`eql_v3`] via `crate::encrypted_record_from_mp_base85`.
+pub(crate) fn encrypted_record_from_mp_base85(
     encrypted: EqlCiphertext,
     encryption_context: Vec<zerokms::Context>,
 ) -> Result<WithContext<'static>, Error> {
-    let encrypted_record = encrypted.body.ciphertext.ok_or_else(|| {
-        Error::InvariantViolation("Missing ciphertext in EQL payload".to_string())
-    })?;
+    let encrypted_record = match encrypted {
+        EqlCiphertext::Encrypted(payload) => payload.ciphertext,
+        EqlCiphertext::SteVec(payload) => {
+            payload
+                .ste_vec
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    Error::InvariantViolation("Missing root entry in SteVec EQL payload".to_string())
+                })?
+                .ciphertext
+        }
+    };
 
     Ok(WithContext {
         record: encrypted_record,
@@ -1164,12 +1256,29 @@ fn encrypted_record_from_mp_base85(
     })
 }
 
+/// Extract the [`EqlCiphertext`] from a Store-mode [`EqlOutput`].
+///
+/// Used by `encrypt` / `encrypt_bulk`, which always run with
+/// `EqlOperation::Store` and therefore must produce storage ciphertexts.
+fn into_store_ciphertext(output: EqlOutput) -> Result<EqlCiphertext, Error> {
+    match output {
+        EqlOutput::Store(ciphertext) => Ok(ciphertext),
+        EqlOutput::Query(_) => Err(Error::InvariantViolation(
+            "encrypt_eql returned a query payload for a store-mode encryption".to_string(),
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exported C FFI functions
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn protect_new_client(options_json: *const c_char) -> CResult {
+pub extern "C" fn protect_new_client(
+    options_json: *const c_char,
+    get_token: ProtectTokenFn,
+    token_handle: u64,
+) -> CResult {
     let mut result = CResult::default();
 
     let options_str = match unsafe { c_str_to_string(options_json) } {
@@ -1180,10 +1289,12 @@ pub extern "C" fn protect_new_client(options_json: *const c_char) -> CResult {
         }
     };
 
+    let callback = get_token.map(|f| GoTokenCallback::new(f, token_handle));
+
     let rt = get_runtime();
     match rt.block_on(async {
         let opts: NewClientOptions = serde_json::from_str(&options_str)?;
-        new_client_impl(opts).await
+        new_client_impl(opts, callback).await
     }) {
         Ok(client) => {
             let client_box = Box::new(client);
@@ -1199,11 +1310,21 @@ pub extern "C" fn protect_new_client(options_json: *const c_char) -> CResult {
     result
 }
 
-#[no_mangle]
-pub extern "C" fn protect_encrypt(
+/// Run an operation that parses `options_json`, executes an async impl against
+/// the client, and serializes the result to JSON. Centralizes the null-check,
+/// UTF-8 decode, runtime dispatch, and error stringification every exported
+/// operation shares.
+fn run_client_op<Opts, Out, F, Fut>(
     client_ptr: *const Client,
     options_json: *const c_char,
-) -> CResult {
+    run: F,
+) -> CResult
+where
+    Opts: for<'de> Deserialize<'de>,
+    Out: Serialize,
+    F: FnOnce(&'static Client, Opts) -> Fut,
+    Fut: std::future::Future<Output = Result<Out, Error>>,
+{
     let mut result = CResult::default();
 
     if client_ptr.is_null() {
@@ -1211,7 +1332,9 @@ pub extern "C" fn protect_encrypt(
         return result;
     }
 
-    let client = unsafe { &*client_ptr };
+    // SAFETY: null-checked above; the pointer originates from `Box::into_raw`
+    // in `protect_new_client` and outlives this call.
+    let client: &Client = unsafe { &*client_ptr };
 
     let options_str = match unsafe { c_str_to_string(options_json) } {
         Ok(s) => s,
@@ -1222,11 +1345,13 @@ pub extern "C" fn protect_encrypt(
     };
 
     let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: EncryptOptions = serde_json::from_str(&options_str)?;
-        encrypt_impl(client, opts).await
-    }) {
-        Ok(encrypted) => match serde_json::to_string(&encrypted) {
+    let outcome = rt.block_on(async {
+        let opts: Opts = serde_json::from_str(&options_str)?;
+        run(client, opts).await
+    });
+
+    match outcome {
+        Ok(value) => match serde_json::to_string(&value) {
             Ok(json) => {
                 result.success = true;
                 result.data = string_to_c_str(json);
@@ -1241,6 +1366,16 @@ pub extern "C" fn protect_encrypt(
     }
 
     result
+}
+
+#[no_mangle]
+pub extern "C" fn protect_encrypt(
+    client_ptr: *const Client,
+    options_json: *const c_char,
+) -> CResult {
+    run_client_op(client_ptr, options_json, |client, opts: EncryptOptions| {
+        encrypt_impl(client, opts)
+    })
 }
 
 #[no_mangle]
@@ -1248,43 +1383,11 @@ pub extern "C" fn protect_encrypt_bulk(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: EncryptBulkOptions = serde_json::from_str(&options_str)?;
-        encrypt_bulk_impl(client, opts).await
-    }) {
-        Ok(encrypted_list) => match serde_json::to_string(&encrypted_list) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(
+        client_ptr,
+        options_json,
+        |client, opts: EncryptBulkOptions| encrypt_bulk_impl(client, opts),
+    )
 }
 
 #[no_mangle]
@@ -1292,43 +1395,11 @@ pub extern "C" fn protect_encrypt_query(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: EncryptQueryOptions = serde_json::from_str(&options_str)?;
-        encrypt_query_impl(client, opts).await
-    }) {
-        Ok(encrypted) => match serde_json::to_string(&encrypted) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(
+        client_ptr,
+        options_json,
+        |client, opts: EncryptQueryOptions| encrypt_query_impl(client, opts),
+    )
 }
 
 #[no_mangle]
@@ -1336,43 +1407,11 @@ pub extern "C" fn protect_encrypt_query_bulk(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: EncryptQueryBulkOptions = serde_json::from_str(&options_str)?;
-        encrypt_query_bulk_impl(client, opts).await
-    }) {
-        Ok(encrypted_list) => match serde_json::to_string(&encrypted_list) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(
+        client_ptr,
+        options_json,
+        |client, opts: EncryptQueryBulkOptions| encrypt_query_bulk_impl(client, opts),
+    )
 }
 
 #[no_mangle]
@@ -1380,43 +1419,9 @@ pub extern "C" fn protect_decrypt(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: DecryptOptions = serde_json::from_str(&options_str)?;
-        decrypt_impl(client, opts).await
-    }) {
-        Ok(plaintext) => match serde_json::to_string(&plaintext) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(client_ptr, options_json, |client, opts: DecryptOptions| {
+        decrypt_impl(client, opts)
+    })
 }
 
 #[no_mangle]
@@ -1424,43 +1429,11 @@ pub extern "C" fn protect_decrypt_bulk(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: DecryptBulkOptions = serde_json::from_str(&options_str)?;
-        decrypt_bulk_impl(client, opts).await
-    }) {
-        Ok(plaintexts) => match serde_json::to_string(&plaintexts) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(
+        client_ptr,
+        options_json,
+        |client, opts: DecryptBulkOptions| decrypt_bulk_impl(client, opts),
+    )
 }
 
 #[no_mangle]
@@ -1468,54 +1441,24 @@ pub extern "C" fn protect_decrypt_bulk_fallible(
     client_ptr: *const Client,
     options_json: *const c_char,
 ) -> CResult {
-    let mut result = CResult::default();
-
-    if client_ptr.is_null() {
-        result.error = string_to_c_str("Client pointer is null".to_string());
-        return result;
-    }
-
-    let client = unsafe { &*client_ptr };
-
-    let options_str = match unsafe { c_str_to_string(options_json) } {
-        Ok(s) => s,
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-            return result;
-        }
-    };
-
-    let rt = get_runtime();
-    match rt.block_on(async {
-        let opts: DecryptBulkOptions = serde_json::from_str(&options_str)?;
-        decrypt_bulk_fallible_impl(client, opts).await
-    }) {
-        Ok(results_vec) => match serde_json::to_string(&results_vec) {
-            Ok(json) => {
-                result.success = true;
-                result.data = string_to_c_str(json);
-            }
-            Err(e) => {
-                result.error = string_to_c_str(e.to_string());
-            }
-        },
-        Err(e) => {
-            result.error = string_to_c_str(e.to_string());
-        }
-    }
-
-    result
+    run_client_op(
+        client_ptr,
+        options_json,
+        |client, opts: DecryptBulkOptions| decrypt_bulk_fallible_impl(client, opts),
+    )
 }
 
-/// Check if a JSON value is a valid EQL ciphertext.
+/// Check if a JSON value is a valid EQL ciphertext (v2 or v3 storage payload).
 #[no_mangle]
 pub extern "C" fn protect_is_encrypted(value_json: *const c_char) -> bool {
     let value_str = match unsafe { c_str_to_string(value_json) } {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let result: Result<EqlCiphertext, _> = serde_json::from_str(&value_str);
-    result.is_ok()
+    match serde_json::from_str::<serde_json::Value>(&value_str) {
+        Ok(value) => is_encrypted_value(&value),
+        Err(_) => false,
+    }
 }
 
 #[no_mangle]
@@ -1576,8 +1519,24 @@ mod tests {
 
     mod is_encrypted_tests {
         use super::*;
+        use cipherstash_client::eql::{
+            EncryptedPayload, EqlCiphertext, Identifier as EqlIdentifier, SteVecEntry,
+            SteVecEntryTerm, SteVecPayload, EQL_SCHEMA_VERSION,
+        };
+        use cipherstash_client::zerokms::EncryptedRecord;
         use serde_json::json;
         use std::ffi::CString;
+
+        fn dummy_encrypted_record() -> EncryptedRecord {
+            EncryptedRecord {
+                iv: Default::default(),
+                ciphertext: vec![1; 16],
+                tag: vec![2; 16],
+                descriptor: "users/email".to_string(),
+                keyset_id: None,
+                decryption_policy: None,
+            }
+        }
 
         fn check_is_encrypted(value: serde_json::Value) -> bool {
             let json_str = serde_json::to_string(&value).unwrap();
@@ -1586,48 +1545,60 @@ mod tests {
         }
 
         #[test]
-        fn valid_eql_ciphertext_is_encrypted() {
-            let valid = json!({
-                "i": {"t": "users", "c": "email"},
-                "v": 2
+        fn valid_scalar_ciphertext_is_encrypted() {
+            let payload = EqlCiphertext::Encrypted(EncryptedPayload {
+                version: EQL_SCHEMA_VERSION,
+                identifier: EqlIdentifier::new("users", "email"),
+                ciphertext: dummy_encrypted_record(),
+                hmac_256: None,
+                bloom_filter: None,
+                ore_block_u64_8_256: None,
+                ope_cllw: None,
             });
-            assert!(check_is_encrypted(valid));
+            let value = serde_json::to_value(&payload).unwrap();
+            assert_eq!(value["k"], "ct");
+            assert!(check_is_encrypted(value));
         }
 
         #[test]
-        fn valid_eql_ciphertext_with_ste_vec_is_encrypted() {
-            let valid = json!({
-                "i": {"t": "users", "c": "profile"},
-                "v": 2,
-                "sv": [{"s": "deadbeef"}]
+        fn valid_ste_vec_ciphertext_is_encrypted() {
+            let payload = EqlCiphertext::SteVec(SteVecPayload {
+                version: EQL_SCHEMA_VERSION,
+                identifier: EqlIdentifier::new("users", "profile"),
+                ste_vec: vec![SteVecEntry {
+                    selector: "deadbeef".into(),
+                    ciphertext: dummy_encrypted_record(),
+                    is_array: None,
+                    term: SteVecEntryTerm::Hmac {
+                        hmac_256: "feedface".into(),
+                    },
+                }],
             });
-            assert!(check_is_encrypted(valid));
+            let value = serde_json::to_value(&payload).unwrap();
+            assert_eq!(value["k"], "sv");
+            assert!(check_is_encrypted(value));
         }
 
         #[test]
         fn invalid_ciphertext_is_not_encrypted() {
-            let invalid = json!({"random": "data"});
-            assert!(!check_is_encrypted(invalid));
+            assert!(!check_is_encrypted(json!({"random": "data"})));
         }
 
         #[test]
-        fn old_format_with_k_field_is_still_valid() {
-            let old_format = json!({
-                "k": "ct",
+        fn missing_discriminator_is_not_encrypted() {
+            assert!(!check_is_encrypted(json!({
                 "i": {"t": "users", "c": "email"},
                 "v": 2
-            });
-            assert!(check_is_encrypted(old_format));
+            })));
         }
 
         #[test]
-        fn old_ste_vec_format_with_k_field_is_still_valid() {
-            let old_format = json!({
-                "k": "sv",
-                "i": {"t": "users", "c": "profile"},
+        fn unknown_discriminator_is_not_encrypted() {
+            assert!(!check_is_encrypted(json!({
+                "k": "wat",
+                "i": {"t": "users", "c": "email"},
                 "v": 2
-            });
-            assert!(check_is_encrypted(old_format));
+            })));
         }
     }
 
@@ -1652,9 +1623,7 @@ mod tests {
                 ("b".to_string(), Some(vec!["user:1".to_string()])),
                 ("c".to_string(), Some(vec!["user:1".to_string()])),
             ];
-
             let groups = group_by_lock_context(payloads);
-
             assert_eq!(groups.len(), 1);
             assert_eq!(groups[&vec!["user:1".to_string()]].len(), 3);
         }
@@ -1666,9 +1635,7 @@ mod tests {
                 ("b".to_string(), Some(vec!["user:2".to_string()])),
                 ("c".to_string(), Some(vec!["user:1".to_string()])),
             ];
-
             let groups = group_by_lock_context(payloads);
-
             assert_eq!(groups.len(), 2);
             assert_eq!(groups[&vec!["user:1".to_string()]].len(), 2);
             assert_eq!(groups[&vec!["user:2".to_string()]].len(), 1);
@@ -1681,9 +1648,7 @@ mod tests {
                 ("b".to_string(), None),
                 ("c".to_string(), Some(vec!["user:1".to_string()])),
             ];
-
             let groups = group_by_lock_context(payloads);
-
             assert_eq!(groups.len(), 2);
             assert_eq!(groups[&vec![]].len(), 2);
             assert_eq!(groups[&vec!["user:1".to_string()]].len(), 1);
@@ -1696,15 +1661,74 @@ mod tests {
                 ("b".to_string(), Some(vec!["user:1".to_string()])),
                 ("c".to_string(), Some(vec!["user:2".to_string()])),
             ];
-
             let groups = group_by_lock_context(payloads);
-
             let user1_group = &groups[&vec!["user:1".to_string()]];
             assert_eq!(user1_group[0], (1, "b".to_string()));
-
             let user2_group = &groups[&vec!["user:2".to_string()]];
             assert_eq!(user2_group[0], (0, "a".to_string()));
             assert_eq!(user2_group[1], (2, "c".to_string()));
+        }
+    }
+
+    mod config_parsing {
+        use super::*;
+        use serde_json::json;
+
+        fn parse_config(value: serde_json::Value) -> Result<HashMap<Identifier, ColumnConfig>, Error> {
+            let config: CanonicalEncryptionConfig = serde_json::from_value(value).unwrap();
+            build_config_map(config)
+        }
+
+        #[test]
+        fn canonical_config_maps_columns() {
+            let map = parse_config(json!({
+                "v": 1,
+                "tables": {
+                    "users": {
+                        "email": { "cast_as": "text", "indexes": { "unique": {} } },
+                        "age": { "cast_as": "small_int", "indexes": { "ore": {} } }
+                    }
+                }
+            }))
+            .unwrap();
+            let email = map
+                .get(&Identifier::new("users", "email"))
+                .expect("email column");
+            assert_eq!(
+                email.cast_type,
+                cipherstash_client::schema::column::ColumnType::Text
+            );
+            let age = map
+                .get(&Identifier::new("users", "age"))
+                .expect("age column");
+            assert_eq!(
+                age.cast_type,
+                cipherstash_client::schema::column::ColumnType::SmallInt
+            );
+        }
+
+        #[test]
+        fn ste_vec_on_non_json_column_keeps_go_substring() {
+            let err = parse_config(json!({
+                "v": 1,
+                "tables": {
+                    "users": {
+                        "profile": {
+                            "cast_as": "text",
+                            "indexes": { "ste_vec": { "prefix": "users/profile" } }
+                        }
+                    }
+                }
+            }))
+            .unwrap_err();
+            let msg = err.to_string();
+            // The substring Go's inferSentinel matches on for ErrSteVecRequiresJSON.
+            assert!(
+                msg.contains("ste_vec index requires cast_as"),
+                "error must keep the Go sentinel substring: {msg}"
+            );
+            assert!(msg.contains("users"));
+            assert!(msg.contains("profile"));
         }
     }
 
@@ -1713,42 +1737,43 @@ mod tests {
 
         #[test]
         fn parse_query_op_default() {
-            let result = parse_query_op("default");
-            assert!(matches!(result, Ok(QueryOp::Default)));
+            assert!(matches!(parse_query_op("default"), Ok(QueryOp::Default)));
         }
 
         #[test]
         fn parse_query_op_ste_vec_selector() {
-            let result = parse_query_op("ste_vec_selector");
-            assert!(matches!(result, Ok(QueryOp::SteVecSelector)));
+            assert!(matches!(
+                parse_query_op("ste_vec_selector"),
+                Ok(QueryOp::SteVecSelector)
+            ));
         }
 
         #[test]
         fn parse_query_op_ste_vec_term() {
-            let result = parse_query_op("ste_vec_term");
-            assert!(matches!(result, Ok(QueryOp::SteVecTerm)));
+            assert!(matches!(
+                parse_query_op("ste_vec_term"),
+                Ok(QueryOp::SteVecTerm)
+            ));
         }
 
         #[test]
         fn parse_query_op_unknown_returns_error() {
-            let result = parse_query_op("unknown");
-            assert!(result.is_err());
-            let err = result.unwrap_err();
+            let err = parse_query_op("unknown").unwrap_err();
             assert!(err.to_string().contains("Unknown query operation"));
         }
     }
 
     mod find_index_for_type_tests {
         use super::*;
-        use cipherstash_client::schema::column::{Index, IndexType, Tokenizer};
+        use cipherstash_client::schema::column::{ColumnMode, ColumnType, Index, IndexType, Tokenizer};
 
         fn make_column_config_with_indexes(indexes: Vec<Index>) -> ColumnConfig {
             ColumnConfig {
                 name: "test_column".to_string(),
-                cast_type: cipherstash_client::schema::column::ColumnType::Utf8Str,
+                cast_type: ColumnType::Text,
                 indexes,
                 in_place: false,
-                mode: cipherstash_client::schema::column::ColumnMode::Encrypted,
+                mode: ColumnMode::Encrypted,
             }
         }
 
@@ -1758,9 +1783,9 @@ mod tests {
                 prefix: "test".to_string(),
                 term_filters: vec![],
                 array_index_mode: Default::default(),
+                mode: Default::default(),
             })]);
             let result = find_index_for_type(&config, "test_column", "ste_vec");
-            assert!(result.is_ok());
             assert!(matches!(
                 result.unwrap().index_type,
                 IndexType::SteVec { .. }
@@ -1770,9 +1795,12 @@ mod tests {
         #[test]
         fn find_ore_index() {
             let config = make_column_config_with_indexes(vec![Index::new(IndexType::Ore)]);
-            let result = find_index_for_type(&config, "test_column", "ore");
-            assert!(result.is_ok());
-            assert!(matches!(result.unwrap().index_type, IndexType::Ore));
+            assert!(matches!(
+                find_index_for_type(&config, "test_column", "ore")
+                    .unwrap()
+                    .index_type,
+                IndexType::Ore
+            ));
         }
 
         #[test]
@@ -1780,46 +1808,20 @@ mod tests {
             let config = make_column_config_with_indexes(vec![Index::new(IndexType::Unique {
                 token_filters: vec![],
             })]);
-            let result = find_index_for_type(&config, "test_column", "unique");
-            assert!(result.is_ok());
             assert!(matches!(
-                result.unwrap().index_type,
+                find_index_for_type(&config, "test_column", "unique")
+                    .unwrap()
+                    .index_type,
                 IndexType::Unique { .. }
-            ));
-        }
-
-        #[test]
-        fn find_match_index() {
-            let config = make_column_config_with_indexes(vec![Index::new(IndexType::Match {
-                tokenizer: Tokenizer::Standard,
-                token_filters: vec![],
-                k: 3,
-                m: 2048,
-                include_original: false,
-            })]);
-            let result = find_index_for_type(&config, "test_column", "match");
-            assert!(result.is_ok());
-            assert!(matches!(
-                result.unwrap().index_type,
-                IndexType::Match { .. }
             ));
         }
 
         #[test]
         fn missing_index_returns_error() {
             let config = make_column_config_with_indexes(vec![Index::new(IndexType::Ore)]);
-            let result = find_index_for_type(&config, "test_column", "ste_vec");
-            assert!(result.is_err());
-            let err = result.unwrap_err();
+            let err = find_index_for_type(&config, "test_column", "ste_vec").unwrap_err();
             assert!(err.to_string().contains("does not have"));
             assert!(err.to_string().contains("test_column"));
-        }
-
-        #[test]
-        fn unknown_index_type_returns_error() {
-            let config = make_column_config_with_indexes(vec![Index::new(IndexType::Ore)]);
-            let result = find_index_for_type(&config, "test_column", "invalid_type");
-            assert!(result.is_err());
         }
 
         #[test]
@@ -1834,288 +1836,142 @@ mod tests {
                     include_original: false,
                 }),
             ]);
-            let result = find_index_for_type(&config, "email", "ste_vec");
-            assert!(result.is_err());
-            let err_msg = result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("email"),
-                "Error should include column name: {}",
-                err_msg
-            );
-            assert!(
-                err_msg.contains("ste_vec"),
-                "Error should include requested index type: {}",
-                err_msg
-            );
-            assert!(
-                err_msg.contains("ore"),
-                "Error should show available ore index: {}",
-                err_msg
-            );
-            assert!(
-                err_msg.contains("match"),
-                "Error should show available match index: {}",
-                err_msg
-            );
+            let err_msg = find_index_for_type(&config, "email", "ste_vec")
+                .unwrap_err()
+                .to_string();
+            assert!(err_msg.contains("email"));
+            assert!(err_msg.contains("ste_vec"));
+            assert!(err_msg.contains("ore"));
+            assert!(err_msg.contains("match"));
         }
     }
 
     mod query_inference_tests {
         use super::*;
         use cipherstash_client::encryption::Plaintext;
-        use cipherstash_client::schema::column::Tokenizer;
-        use cipherstash_client::schema::column::{ColumnType, IndexType};
+        use cipherstash_client::schema::column::{ColumnType, IndexType, Tokenizer};
 
-        #[test]
-        fn test_ste_vec_default_with_string_infers_selector() {
-            let go_plaintext = GoPlaintext::String("$.user.email".to_string());
-            let index_type = IndexType::SteVec {
+        fn ste_vec_index() -> IndexType {
+            IndexType::SteVec {
                 prefix: "test/col".to_string(),
                 term_filters: vec![],
                 array_index_mode: Default::default(),
-            };
+                mode: Default::default(),
+            }
+        }
 
+        #[test]
+        fn ste_vec_default_with_string_infers_selector() {
             let result = to_query_plaintext(
-                &go_plaintext,
+                &GoPlaintext::String("$.user.email".to_string()),
                 QueryOp::Default,
-                &index_type,
-                ColumnType::JsonB,
+                &ste_vec_index(),
+                ColumnType::Json,
+                EqlVersion::V2,
             );
-
             assert!(matches!(
                 result,
                 Ok((
-                    Plaintext::Utf8Str(Some(_)),
+                    Plaintext::Text(Some(_)),
                     InferredQueryMode::QueryMode(QueryOp::SteVecSelector)
                 ))
             ));
         }
 
         #[test]
-        fn test_ste_vec_default_with_object_infers_store_mode() {
-            let go_plaintext = GoPlaintext::JsonB(serde_json::json!({"role": "admin"}));
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
+        fn ste_vec_default_with_object_infers_store_mode() {
             let result = to_query_plaintext(
-                &go_plaintext,
+                &GoPlaintext::JsonB(serde_json::json!({"role": "admin"})),
                 QueryOp::Default,
-                &index_type,
-                ColumnType::JsonB,
+                &ste_vec_index(),
+                ColumnType::Json,
+                EqlVersion::V2,
             );
-
             assert!(matches!(
                 result,
-                Ok((Plaintext::JsonB(Some(_)), InferredQueryMode::StoreMode))
+                Ok((Plaintext::Json(Some(_)), InferredQueryMode::StoreMode))
             ));
         }
 
         #[test]
-        fn test_ste_vec_default_with_array_infers_store_mode() {
-            let go_plaintext = GoPlaintext::JsonB(serde_json::json!(["admin", "user"]));
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
+        fn ste_vec_default_with_number_returns_error() {
             let result = to_query_plaintext(
-                &go_plaintext,
+                &GoPlaintext::Number(serde_json::Number::from(42)),
                 QueryOp::Default,
-                &index_type,
-                ColumnType::JsonB,
+                &ste_vec_index(),
+                ColumnType::Json,
+                EqlVersion::V2,
             );
-
-            assert!(matches!(
-                result,
-                Ok((Plaintext::JsonB(Some(_)), InferredQueryMode::StoreMode))
-            ));
+            assert!(result.unwrap_err().to_string().contains("Invalid query input"));
         }
 
         #[test]
-        fn test_ste_vec_default_with_number_returns_error() {
-            let go_plaintext = GoPlaintext::Number(42.0);
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
+        fn non_ste_vec_default_uses_column_type_under_v2() {
             let result = to_query_plaintext(
-                &go_plaintext,
+                &GoPlaintext::String("search term".to_string()),
                 QueryOp::Default,
-                &index_type,
-                ColumnType::JsonB,
+                &IndexType::Match {
+                    tokenizer: Tokenizer::Standard,
+                    token_filters: vec![],
+                    k: 6,
+                    m: 2048,
+                    include_original: true,
+                },
+                ColumnType::Text,
+                EqlVersion::V2,
             );
-
-            assert!(result.is_err());
-            let err_msg = result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("Invalid query input"),
-                "Error message should mention invalid input: {}",
-                err_msg
-            );
-        }
-
-        #[test]
-        fn test_ste_vec_default_with_boolean_returns_error() {
-            let go_plaintext = GoPlaintext::Boolean(true);
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
-            let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::Default,
-                &index_type,
-                ColumnType::JsonB,
-            );
-
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn test_explicit_ste_vec_selector_uses_query_mode() {
-            let go_plaintext = GoPlaintext::String("$.name".to_string());
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
-            let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::SteVecSelector,
-                &index_type,
-                ColumnType::JsonB,
-            );
-
             assert!(matches!(
                 result,
                 Ok((
-                    Plaintext::Utf8Str(Some(_)),
-                    InferredQueryMode::QueryMode(QueryOp::SteVecSelector)
-                ))
-            ));
-        }
-
-        #[test]
-        fn test_explicit_ste_vec_term_uses_store_mode() {
-            let go_plaintext = GoPlaintext::JsonB(serde_json::json!({"key": "value"}));
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
-            let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::SteVecTerm,
-                &index_type,
-                ColumnType::JsonB,
-            );
-
-            assert!(matches!(
-                result,
-                Ok((Plaintext::JsonB(Some(_)), InferredQueryMode::StoreMode))
-            ));
-        }
-
-        #[test]
-        fn test_non_ste_vec_default_uses_column_type() {
-            let go_plaintext = GoPlaintext::String("search term".to_string());
-            let index_type = IndexType::Match {
-                tokenizer: Tokenizer::Standard,
-                token_filters: vec![],
-                k: 6,
-                m: 2048,
-                include_original: true,
-            };
-
-            let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::Default,
-                &index_type,
-                ColumnType::Utf8Str,
-            );
-
-            assert!(matches!(
-                result,
-                Ok((
-                    Plaintext::Utf8Str(Some(_)),
+                    Plaintext::Text(Some(_)),
                     InferredQueryMode::QueryMode(QueryOp::Default)
                 ))
             ));
         }
 
         #[test]
-        fn test_ste_vec_term_with_string_error_is_helpful() {
-            let go_plaintext = GoPlaintext::String("admin".to_string());
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
+        fn scalar_default_under_v3_infers_store_mode() {
             let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::SteVecTerm,
-                &index_type,
-                ColumnType::JsonB,
+                &GoPlaintext::String("hello".to_string()),
+                QueryOp::Default,
+                &IndexType::Unique {
+                    token_filters: vec![],
+                },
+                ColumnType::Text,
+                EqlVersion::V3,
             );
-
-            assert!(result.is_err());
-            let err_msg = result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("ste_vec_term"),
-                "Error should mention ste_vec_term: {}",
-                err_msg
-            );
-            assert!(
-                err_msg.contains("String"),
-                "Error should mention received String: {}",
-                err_msg
-            );
-            assert!(
-                err_msg.contains("ste_vec_selector") || err_msg.contains("path"),
-                "Error should suggest ste_vec_selector for paths: {}",
-                err_msg
-            );
+            assert!(matches!(
+                result,
+                Ok((Plaintext::Text(Some(_)), InferredQueryMode::StoreMode))
+            ));
         }
 
         #[test]
-        fn test_invalid_json_path_error() {
-            let go_plaintext = GoPlaintext::String("user.email".to_string());
-            let index_type = IndexType::SteVec {
-                prefix: "test/col".to_string(),
-                term_filters: vec![],
-                array_index_mode: Default::default(),
-            };
-
+        fn ste_vec_term_with_string_error_is_helpful() {
             let result = to_query_plaintext(
-                &go_plaintext,
-                QueryOp::SteVecSelector,
-                &index_type,
-                ColumnType::JsonB,
+                &GoPlaintext::String("admin".to_string()),
+                QueryOp::SteVecTerm,
+                &ste_vec_index(),
+                ColumnType::Json,
+                EqlVersion::V2,
             );
-
-            assert!(result.is_err());
             let err_msg = result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("user.email"),
-                "Error should show the invalid path: {}",
-                err_msg
+            assert!(err_msg.contains("ste_vec_term"));
+            assert!(err_msg.contains("String"));
+        }
+
+        #[test]
+        fn invalid_json_path_error() {
+            let result = to_query_plaintext(
+                &GoPlaintext::String("user.email".to_string()),
+                QueryOp::SteVecSelector,
+                &ste_vec_index(),
+                ColumnType::Json,
+                EqlVersion::V2,
             );
-            assert!(
-                err_msg.contains("$.user.email") || err_msg.contains("$"),
-                "Error should suggest correct format with $: {}",
-                err_msg
-            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(err_msg.contains("user.email"));
+            assert!(err_msg.contains('$'));
         }
     }
 }

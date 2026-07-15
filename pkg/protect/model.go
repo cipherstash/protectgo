@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -475,9 +476,20 @@ func setFieldValue(field reflect.Value, val any) {
 		return
 	}
 
-	// Direct assignment if types are compatible.
+	// Direct assignment if types are compatible (covers time.Time -> time.Time).
 	if valReflect.Type().AssignableTo(fieldType) {
 		field.Set(valReflect)
+		return
+	}
+
+	// time.Time destinations accept RFC 3339 or date-only strings, which is how
+	// the native layer returns date and timestamp columns.
+	if fieldType == timeType {
+		if s, ok := val.(string); ok {
+			if t, ok := parseTime(s); ok {
+				field.Set(reflect.ValueOf(t))
+			}
+		}
 		return
 	}
 
@@ -502,6 +514,8 @@ func setFieldValue(field reflect.Value, val any) {
 		case json.Number:
 			if i, err := n.Int64(); err == nil {
 				field.SetInt(i)
+			} else if f, err := n.Float64(); err == nil {
+				field.SetInt(int64(f))
 			}
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -512,6 +526,12 @@ func setFieldValue(field reflect.Value, val any) {
 			field.SetUint(uint64(n))
 		case uint64:
 			field.SetUint(n)
+		case json.Number:
+			if i, err := n.Int64(); err == nil && i >= 0 {
+				field.SetUint(uint64(i))
+			} else if f, err := n.Float64(); err == nil && f >= 0 {
+				field.SetUint(uint64(f))
+			}
 		}
 	case reflect.Float32, reflect.Float64:
 		switch n := val.(type) {
@@ -531,4 +551,16 @@ func setFieldValue(field reflect.Value, val any) {
 			field.SetBool(b)
 		}
 	}
+}
+
+// parseTime parses a string returned by the native layer for a date or
+// timestamp column. It accepts RFC 3339 (with or without fractional seconds)
+// and date-only "YYYY-MM-DD" forms.
+func parseTime(s string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

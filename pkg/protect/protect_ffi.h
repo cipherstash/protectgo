@@ -23,7 +23,19 @@ typedef struct CResult {
     const char *error;
 } CResult;
 
- struct CResult protect_new_client(const char *options_json) ;
+/**
+ * The C `getToken` callback: `char *(*)(uint64_t handle)`.
+ *
+ * Go returns a malloc'd (C heap, via `C.CString`) NUL-terminated JSON string,
+ * or NULL to signal "provider failed with no detail".
+ */
+typedef char *(*ProtectTokenFn)(uint64_t handle);
+
+
+struct CResult protect_new_client(const char *options_json,
+                                  ProtectTokenFn get_token,
+                                  uint64_t token_handle)
+;
 
  struct CResult protect_encrypt(const struct Client *client_ptr, const char *options_json) ;
 
@@ -46,7 +58,7 @@ struct CResult protect_decrypt_bulk_fallible(const struct Client *client_ptr,
 ;
 
 /**
- * Check if a JSON value is a valid EQL ciphertext.
+ * Check if a JSON value is a valid EQL ciphertext (v2 or v3 storage payload).
  */
  bool protect_is_encrypted(const char *value_json) ;
 
