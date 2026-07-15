@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // TableDef holds a parsed table schema. It is the primary reference for
@@ -410,21 +411,31 @@ func parseSteVecOpts(params string) *SteVecIndexOpts {
 	return opts
 }
 
-// inferCastAs determines the CastAs value from a Go reflect.Type.
+// timeType is the reflect.Type of time.Time, used to infer the timestamp cast.
+var timeType = reflect.TypeOf(time.Time{})
+
+// inferCastAs determines the CastAs value from a Go reflect.Type. The result is
+// a public CastAs constant; it is normalized to its canonical wire name when the
+// encryption config is built.
 func inferCastAs(fieldType reflect.Type) CastAs {
 	// Dereference pointers.
 	for fieldType.Kind() == reflect.Ptr {
 		fieldType = fieldType.Elem()
 	}
 
+	// time.Time maps to a timestamp column regardless of its struct kind.
+	if fieldType == timeType {
+		return CastAsTimestamp
+	}
+
 	switch fieldType.Kind() {
 	case reflect.String:
-		return CastAsString
+		return CastAsText
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return CastAsNumber
+		return CastAsBigInt
 	case reflect.Float32, reflect.Float64:
-		return CastAsNumber
+		return CastAsFloat
 	case reflect.Bool:
 		return CastAsBoolean
 	default:

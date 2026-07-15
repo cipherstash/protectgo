@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // --- Tag parsing tests ---
@@ -117,8 +118,8 @@ func TestParseColumnSimple(t *testing.T) {
 	t.Parallel()
 
 	col := parseColumn(nil, reflect.TypeOf(""))
-	if col.CastAs == nil || *col.CastAs != CastAsString {
-		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsString)
+	if col.CastAs == nil || *col.CastAs != CastAsText {
+		t.Errorf("cast_as: got %v, want %q", col.CastAs, CastAsText)
 	}
 	if col.Indexes != nil {
 		t.Errorf("indexes: expected nil, got %+v", col.Indexes)
@@ -284,25 +285,27 @@ func TestInferCastAs(t *testing.T) {
 		typ      reflect.Type
 		wantCast CastAs
 	}{
-		{"string", reflect.TypeOf(""), CastAsString},
-		{"int", reflect.TypeOf(0), CastAsNumber},
-		{"int8", reflect.TypeOf(int8(0)), CastAsNumber},
-		{"int16", reflect.TypeOf(int16(0)), CastAsNumber},
-		{"int32", reflect.TypeOf(int32(0)), CastAsNumber},
-		{"int64", reflect.TypeOf(int64(0)), CastAsNumber},
-		{"uint", reflect.TypeOf(uint(0)), CastAsNumber},
-		{"uint8", reflect.TypeOf(uint8(0)), CastAsNumber},
-		{"uint16", reflect.TypeOf(uint16(0)), CastAsNumber},
-		{"uint32", reflect.TypeOf(uint32(0)), CastAsNumber},
-		{"uint64", reflect.TypeOf(uint64(0)), CastAsNumber},
-		{"float32", reflect.TypeOf(float32(0)), CastAsNumber},
-		{"float64", reflect.TypeOf(float64(0)), CastAsNumber},
+		{"string", reflect.TypeOf(""), CastAsText},
+		{"int", reflect.TypeOf(0), CastAsBigInt},
+		{"int8", reflect.TypeOf(int8(0)), CastAsBigInt},
+		{"int16", reflect.TypeOf(int16(0)), CastAsBigInt},
+		{"int32", reflect.TypeOf(int32(0)), CastAsBigInt},
+		{"int64", reflect.TypeOf(int64(0)), CastAsBigInt},
+		{"uint", reflect.TypeOf(uint(0)), CastAsBigInt},
+		{"uint8", reflect.TypeOf(uint8(0)), CastAsBigInt},
+		{"uint16", reflect.TypeOf(uint16(0)), CastAsBigInt},
+		{"uint32", reflect.TypeOf(uint32(0)), CastAsBigInt},
+		{"uint64", reflect.TypeOf(uint64(0)), CastAsBigInt},
+		{"float32", reflect.TypeOf(float32(0)), CastAsFloat},
+		{"float64", reflect.TypeOf(float64(0)), CastAsFloat},
 		{"bool", reflect.TypeOf(false), CastAsBoolean},
+		{"time.Time", reflect.TypeOf(time.Time{}), CastAsTimestamp},
+		{"*time.Time", reflect.TypeOf((*time.Time)(nil)), CastAsTimestamp},
 		{"map", reflect.TypeOf(map[string]any{}), CastAsJSON},
 		{"slice", reflect.TypeOf([]string{}), CastAsJSON},
 		{"interface", reflect.TypeOf((*any)(nil)).Elem(), CastAsJSON},
-		{"*string", reflect.TypeOf((*string)(nil)), CastAsString},
-		{"*int", reflect.TypeOf((*int)(nil)), CastAsNumber},
+		{"*string", reflect.TypeOf((*string)(nil)), CastAsText},
+		{"*int", reflect.TypeOf((*int)(nil)), CastAsBigInt},
 		{"*bool", reflect.TypeOf((*bool)(nil)), CastAsBoolean},
 	}
 
@@ -362,8 +365,8 @@ func TestTableSchemaFullStruct(t *testing.T) {
 	if !ok {
 		t.Fatal("missing email column")
 	}
-	if *email.CastAs != CastAsString {
-		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsString)
+	if *email.CastAs != CastAsText {
+		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsText)
 	}
 	if email.Indexes == nil {
 		t.Fatal("email indexes: expected non-nil")
@@ -644,13 +647,13 @@ func TestTableSchemaPointerFieldTypeInference(t *testing.T) {
 	}
 
 	email := td.columns["email"]
-	if *email.CastAs != CastAsString {
-		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsString)
+	if *email.CastAs != CastAsText {
+		t.Errorf("email cast_as: got %q, want %q", *email.CastAs, CastAsText)
 	}
 
 	age := td.columns["age"]
-	if *age.CastAs != CastAsNumber {
-		t.Errorf("age cast_as: got %q, want %q", *age.CastAs, CastAsNumber)
+	if *age.CastAs != CastAsBigInt {
+		t.Errorf("age cast_as: got %q, want %q", *age.CastAs, CastAsBigInt)
 	}
 
 	ok := td.columns["ok"]
@@ -703,8 +706,9 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 	if !ok {
 		t.Fatal("email column: not a map")
 	}
-	if emailCol["cast_as"] != "string" {
-		t.Errorf("email cast_as: got %v, want %q", emailCol["cast_as"], "string")
+	// "string" is normalized to the canonical "text" on the wire.
+	if emailCol["cast_as"] != "text" {
+		t.Errorf("email cast_as: got %v, want %q", emailCol["cast_as"], "text")
 	}
 
 	emailIndexes, ok := emailCol["indexes"].(map[string]any)
@@ -722,8 +726,9 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 	if !ok {
 		t.Fatal("age column: not a map")
 	}
-	if ageCol["cast_as"] != "number" {
-		t.Errorf("age cast_as: got %v, want %q", ageCol["cast_as"], "number")
+	// "number" is normalized to the canonical "float" on the wire.
+	if ageCol["cast_as"] != "float" {
+		t.Errorf("age cast_as: got %v, want %q", ageCol["cast_as"], "float")
 	}
 
 	ageIndexes, ok := ageCol["indexes"].(map[string]any)
@@ -732,6 +737,61 @@ func TestBuildEncryptConfigJSONOutput(t *testing.T) {
 	}
 	if _, ok := ageIndexes["ore"]; !ok {
 		t.Error("age: missing ore index in JSON")
+	}
+}
+
+// --- Canonicalization tests ---
+
+func TestBuildEncryptConfigInjectsSteVecArrayIndexMode(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("docs").
+		Column("body", CastAsJSON).SearchableJSON("docs/body").Done().
+		Build()
+
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	steVec := result["tables"].(map[string]any)["docs"].(map[string]any)["body"].(map[string]any)["indexes"].(map[string]any)["ste_vec"].(map[string]any)
+	if steVec["array_index_mode"] != "none" {
+		t.Errorf("array_index_mode: got %v, want %q", steVec["array_index_mode"], "none")
+	}
+
+	// Canonicalization must not mutate the stored schema.
+	if td.columns["body"].Indexes.SteVecIndex.ArrayIndexMode != nil {
+		t.Error("stored schema ste_vec ArrayIndexMode should remain nil")
+	}
+}
+
+func TestBuildEncryptConfigNormalizesBigInt(t *testing.T) {
+	t.Parallel()
+
+	td := NewSchema("t").
+		Column("n", CastAsBigInt).OrderAndRange().Done().
+		Build()
+
+	config := buildEncryptConfigFromSchemas([]*TableDef{td})
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	col := result["tables"].(map[string]any)["t"].(map[string]any)["n"].(map[string]any)
+	if col["cast_as"] != "big_int" {
+		t.Errorf("cast_as: got %v, want %q", col["cast_as"], "big_int")
 	}
 }
 

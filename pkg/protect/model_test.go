@@ -2,9 +2,11 @@ package protect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // --- Test structs used across multiple tests ---
@@ -444,6 +446,122 @@ func TestSetFieldValue(t *testing.T) {
 			t.Errorf("got %q, want %q", s, "42")
 		}
 	})
+}
+
+func TestSetFieldValueJSONNumber(t *testing.T) {
+	t.Parallel()
+
+	t.Run("json.Number to int64 preserves large values", func(t *testing.T) {
+		t.Parallel()
+		var i int64
+		v := reflect.ValueOf(&i).Elem()
+		// 9007199254740993 = 2^53 + 1, which would lose precision as float64.
+		setFieldValue(v, json.Number("9007199254740993"))
+		if i != 9007199254740993 {
+			t.Errorf("got %d, want 9007199254740993", i)
+		}
+	})
+
+	t.Run("json.Number to uint", func(t *testing.T) {
+		t.Parallel()
+		var u uint64
+		v := reflect.ValueOf(&u).Elem()
+		setFieldValue(v, json.Number("42"))
+		if u != 42 {
+			t.Errorf("got %d, want 42", u)
+		}
+	})
+
+	t.Run("json.Number to float", func(t *testing.T) {
+		t.Parallel()
+		var f float64
+		v := reflect.ValueOf(&f).Elem()
+		setFieldValue(v, json.Number("3.5"))
+		if f != 3.5 {
+			t.Errorf("got %v, want 3.5", f)
+		}
+	})
+}
+
+func TestSetFieldValueTime(t *testing.T) {
+	t.Parallel()
+
+	t.Run("RFC3339 string to time.Time", func(t *testing.T) {
+		t.Parallel()
+		var tm time.Time
+		v := reflect.ValueOf(&tm).Elem()
+		setFieldValue(v, "2021-03-04T05:06:07Z")
+		want := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+		if !tm.Equal(want) {
+			t.Errorf("got %v, want %v", tm, want)
+		}
+	})
+
+	t.Run("date-only string to time.Time", func(t *testing.T) {
+		t.Parallel()
+		var tm time.Time
+		v := reflect.ValueOf(&tm).Elem()
+		setFieldValue(v, "2021-03-04")
+		want := time.Date(2021, 3, 4, 0, 0, 0, 0, time.UTC)
+		if !tm.Equal(want) {
+			t.Errorf("got %v, want %v", tm, want)
+		}
+	})
+
+	t.Run("time.Time value assigns directly", func(t *testing.T) {
+		t.Parallel()
+		var tm time.Time
+		v := reflect.ValueOf(&tm).Elem()
+		want := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		setFieldValue(v, want)
+		if !tm.Equal(want) {
+			t.Errorf("got %v, want %v", tm, want)
+		}
+	})
+
+	t.Run("pointer to time.Time from string", func(t *testing.T) {
+		t.Parallel()
+		var tm *time.Time
+		v := reflect.ValueOf(&tm).Elem()
+		setFieldValue(v, "2021-03-04T05:06:07Z")
+		if tm == nil {
+			t.Fatal("got nil pointer")
+		}
+		want := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+		if !tm.Equal(want) {
+			t.Errorf("got %v, want %v", *tm, want)
+		}
+	})
+}
+
+func TestParseTime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantOK  bool
+		wantVal time.Time
+	}{
+		{"rfc3339", "2021-03-04T05:06:07Z", true, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)},
+		{"rfc3339 nano", "2021-03-04T05:06:07.5Z", true, time.Date(2021, 3, 4, 5, 6, 7, 500000000, time.UTC)},
+		{"date only", "2021-03-04", true, time.Date(2021, 3, 4, 0, 0, 0, 0, time.UTC)},
+		{"garbage", "not a time", false, time.Time{}},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseTime(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("ok: got %v, want %v", ok, tc.wantOK)
+			}
+			if ok && !got.Equal(tc.wantVal) {
+				t.Errorf("got %v, want %v", got, tc.wantVal)
+			}
+		})
+	}
 }
 
 // --- toEncrypted tests ---

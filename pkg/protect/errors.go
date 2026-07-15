@@ -32,6 +32,21 @@ var (
 	// ErrSteVecRequiresJSON indicates an ste_vec index requires a JSON cast type.
 	ErrSteVecRequiresJSON = errors.New("protect: ste_vec requires json cast type")
 
+	// ErrUnsupportedFormat indicates the column's index configuration has no
+	// equivalent in the selected encrypted format. This typically means a
+	// column uses an index or cast type that the chosen ciphertext format
+	// (see [WithEncryptedFormat]) cannot represent.
+	ErrUnsupportedFormat = errors.New("protect: unsupported encrypted format for column")
+
+	// ErrInvalidCiphertext indicates a value passed for decryption is not a
+	// valid ciphertext payload.
+	ErrInvalidCiphertext = errors.New("protect: invalid ciphertext")
+
+	// ErrAuthStrategy indicates a client authentication strategy is
+	// misconfigured — for example [WithOIDCFederation] was selected without a
+	// workspace CRN, or a token callback is required but was not supplied.
+	ErrAuthStrategy = errors.New("protect: auth strategy misconfigured")
+
 	// ErrFFI indicates an unclassified error from the FFI layer.
 	// Use errors.Is(err, ErrFFI) to check if an error originated from the
 	// underlying encryption engine when no more specific sentinel applies.
@@ -83,6 +98,13 @@ func inferSentinel(msg string) error {
 		return ErrInvalidJSONPath
 	case strings.Contains(msg, "ste_vec index requires cast_as"):
 		return ErrSteVecRequiresJSON
+	case strings.Contains(msg, "no EQL v3 column type"):
+		return ErrUnsupportedFormat
+	case strings.Contains(msg, "invalid ciphertext"):
+		return ErrInvalidCiphertext
+	case strings.Contains(msg, "workspaceCrn is required"),
+		strings.Contains(msg, "auth strategy requires a token callback"):
+		return ErrAuthStrategy
 	default:
 		return ErrFFI
 	}
