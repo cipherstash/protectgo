@@ -132,7 +132,7 @@ jobs:
       - name: Build library
         run: |
           cd crates/protect-ffi-c
-          cargo build --release --target ${{ matrix.rust_target }}
+          cargo build --release --locked --target ${{ matrix.rust_target }}
 
       - name: Copy library
         run: |
