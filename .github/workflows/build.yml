@@ -66,29 +66,41 @@ jobs:
           - platform: darwin-arm64
             os: macos-14
             rust_target: aarch64-apple-darwin
+            lib_file: libprotect_ffi_darwin_arm64.a
 
           # macOS Intel (native build)
           - platform: darwin-x64
-            os: macos-13
+            os: macos-15-intel
             rust_target: x86_64-apple-darwin
+            lib_file: libprotect_ffi_darwin_x64.a
 
           # Linux x64 musl (for Alpine and static linking)
           - platform: linux-x64-musl
             os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-musl
             libc: musl
+            lib_file: libprotect_ffi_linux_x64_musl.a
 
           # Linux x64 glibc (for Debian/Ubuntu/CentOS)
           - platform: linux-x64-gnu
             os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             libc: glibc
+            lib_file: libprotect_ffi_linux_x64.a
+
+          # Linux arm64 glibc (for Debian/Ubuntu/CentOS)
+          - platform: linux-arm64-gnu
+            os: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            libc: glibc
+            lib_file: libprotect_ffi_linux_arm64.a
 
           # Linux arm64 musl (for Alpine and static linking)
           - platform: linux-arm64-musl
             os: ubuntu-22.04-arm
             rust_target: aarch64-unknown-linux-musl
             libc: musl
+            lib_file: libprotect_ffi_linux_arm64_musl.a
 
     runs-on: ${{ matrix.os }}
     
@@ -126,7 +138,7 @@ jobs:
         if: contains(matrix.rust_target, 'musl') && startsWith(matrix.os, 'ubuntu')
         run: |
           mkdir -p .cargo
-          echo '[target.x86_64-unknown-linux-musl]' >> .cargo/config.toml
+          echo '[target.${{ matrix.rust_target }}]' >> .cargo/config.toml
           echo 'rustflags = ["-C", "target-feature=+crt-static"]' >> .cargo/config.toml
 
       - name: Build library
@@ -136,33 +148,18 @@ jobs:
 
       - name: Copy library
         run: |
-          # Create platform-specific filename for direct CGO usage
-          case "${{ matrix.platform }}" in
-            darwin-arm64)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_darwin_arm64.a
-              ;;
-            darwin-x64)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_darwin_x64.a
-              ;;
-            linux-arm64-musl)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_arm64_musl.a
-              ;;
-            linux-x64-musl)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_x64_musl.a
-              ;;
-            linux-arm64-gnu)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_arm64.a
-              ;;
-            linux-x64-gnu)
-              cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a pkg/protect/libprotect_ffi_linux_x64.a
-              ;;
-          esac
+          # Stage only this job's freshly built archive, never the (possibly
+          # stale) archives from the checkout, under its platform-specific
+          # filename for direct CGO usage.
+          mkdir -p dist
+          cp target/${{ matrix.rust_target }}/release/libprotect_ffi.a dist/${{ matrix.lib_file }}
 
       - name: Upload library artifact
         uses: actions/upload-artifact@v4
         with:
           name: library-${{ matrix.platform }}
-          path: pkg/protect/libprotect_ffi_*.a
+          path: dist/${{ matrix.lib_file }}
+          if-no-files-found: error
           retention-days: 30
 
   # Commit all generated libraries at once
@@ -173,46 +170,52 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      # Check out the exact commit the archives were built from, not the
+      # branch head, so a branch that advanced mid-build cannot end up with
+      # archives built from older source.
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-          ref: ${{ github.head_ref || github.ref }}
+          ref: ${{ github.sha }}
 
+      # Each matrix job uploads exactly one uniquely named archive, so all
+      # artifacts can be merged into a single directory.
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: library-*
           path: temp-artifacts
-          merge-multiple: false
+          merge-multiple: true
 
-      - name: Copy artifacts to package directory
+      - name: Verify and copy artifacts to package directory
         run: |
-          for artifact_dir in temp-artifacts/library-*; do
-            platform=$(basename "$artifact_dir" | sed 's/library-//')
-            echo "Copying library for platform: $platform"
-            
-            # Copy platform-specific files to package directory
-            if [ -f "$artifact_dir/libprotect_ffi_darwin_arm64.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_darwin_arm64.a" "pkg/protect/"
-            fi
-            if [ -f "$artifact_dir/libprotect_ffi_darwin_x64.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_darwin_x64.a" "pkg/protect/"
-            fi
-            if [ -f "$artifact_dir/libprotect_ffi_linux_arm64.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_linux_arm64.a" "pkg/protect/"
-            fi
-            if [ -f "$artifact_dir/libprotect_ffi_linux_x64.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_linux_x64.a" "pkg/protect/"
-            fi
-            if [ -f "$artifact_dir/libprotect_ffi_linux_arm64_musl.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_linux_arm64_musl.a" "pkg/protect/"
-            fi
-            if [ -f "$artifact_dir/libprotect_ffi_linux_x64_musl.a" ]; then
-              cp "$artifact_dir/libprotect_ffi_linux_x64_musl.a" "pkg/protect/"
+          expected="libprotect_ffi_darwin_arm64.a libprotect_ffi_darwin_x64.a libprotect_ffi_linux_arm64.a libprotect_ffi_linux_arm64_musl.a libprotect_ffi_linux_x64.a libprotect_ffi_linux_x64_musl.a"
+          for lib in $expected; do
+            if [ ! -f "temp-artifacts/$lib" ]; then
+              echo "::error::Missing built archive: $lib"
+              exit 1
             fi
           done
+          count=$(find temp-artifacts -name '*.a' | wc -l)
+          if [ "$count" -ne 6 ]; then
+            echo "::error::Expected exactly 6 archives, found $count"
+            find temp-artifacts -name '*.a'
+            exit 1
+          fi
+          cp temp-artifacts/*.a pkg/protect/
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Link smoke test: compiling the test binary links the freshly built
+      # linux x64 gnu archive, catching missing symbols before they are
+      # committed.
+      - name: Verify Go bindings link against the new archives
+        run: CGO_ENABLED=1 go test -c -o /dev/null ./pkg/protect
 
       - name: Commit and push all artifacts
         run: |
@@ -223,7 +226,10 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Update all platform libraries [skip ci]"
-            git push
+            # Explicit refspec from the built SHA: fails (non-fast-forward)
+            # instead of clobbering if the branch advanced during the build.
+            git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
