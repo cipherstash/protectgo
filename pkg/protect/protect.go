@@ -25,7 +25,7 @@ package protect
 
 /*
 #cgo LDFLAGS: -L${SRCDIR}
-#cgo darwin LDFLAGS: -framework CoreFoundation -framework Security
+#cgo darwin LDFLAGS: -framework CoreFoundation -framework Security -framework SystemConfiguration
 #cgo darwin,arm64 LDFLAGS: -lprotect_ffi_darwin_arm64
 #cgo darwin,amd64 LDFLAGS: -lprotect_ffi_darwin_x64
 #cgo linux,arm64,!musl LDFLAGS: -lprotect_ffi_linux_arm64 -lm -ldl -lpthread
